@@ -12,7 +12,12 @@ class TileView extends StatefulWidget {
 
   final Renderer renderer;
 
-  const TileView({super.key, required this.mapModel, required this.renderer});
+  /// Paint opacity for this renderer's tiles, 0.0–1.0. Used to blend a custom
+  /// overlay/base source over the layers below. Defaults to 1.0 (fully opaque),
+  /// which keeps the vector base byte-identical.
+  final double opacity;
+
+  const TileView({super.key, required this.mapModel, required this.renderer, this.opacity = 1.0});
 
   @override
   State<TileView> createState() => _TileViewState();
@@ -48,9 +53,15 @@ class _TileViewState extends State<TileView> {
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints constraints) {
         /// Multiply the mappixels of the view with the scalefactor because the images will be shrinked by that factor in [TransformWidget].
+        final double scaleFactor = MapsforgeSettingsMgr().getDeviceScaleFactor();
         jobQueue.setSize(
-          constraints.maxWidth * MapsforgeSettingsMgr().getDeviceScaleFactor(),
-          constraints.maxHeight * MapsforgeSettingsMgr().getDeviceScaleFactor(),
+          constraints.maxWidth * scaleFactor,
+          constraints.maxHeight * scaleFactor,
+        );
+        // Also inform the model so it can keep the whole viewport within bounds.
+        widget.mapModel.setViewSize(
+          constraints.maxWidth * scaleFactor,
+          constraints.maxHeight * scaleFactor,
         );
         // use notifier instead of stream because it should be faster
         return ListenableBuilder(
@@ -72,7 +83,7 @@ class _TileViewState extends State<TileView> {
             // We do not have a position yet or we wait for processing of the first tiles
             //          return const SizedBox.expand();
           },
-          child: CustomPaint(foregroundPainter: TilePainter(jobQueue), child: const SizedBox.expand()),
+          child: CustomPaint(foregroundPainter: TilePainter(jobQueue, opacity: widget.opacity), child: const SizedBox.expand()),
         );
       },
     );

@@ -56,4 +56,14 @@ abstract class Renderer {
   ///
   /// Returns true if separate label rendering is supported
   bool supportLabels();
+
+  /// Whether a tile with no data should fall back to a fully transparent tile
+  /// instead of the opaque "No data available" placeholder.
+  ///
+  /// Base renderers (the offline vector map, a base online source) want the
+  /// opaque placeholder so gaps are visible. A transparent OVERLAY source
+  /// stacked on top of a base must NOT paint an opaque grid over it — it returns
+  /// true so missing/failed tiles simply show nothing and the layer below shows
+  /// through. Defaults to false.
+  bool get transparentOnMiss => false;
 }

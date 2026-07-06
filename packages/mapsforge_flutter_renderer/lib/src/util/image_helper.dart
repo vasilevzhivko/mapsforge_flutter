@@ -68,6 +68,21 @@ class ImageHelper {
     return _noData!.clone();
   }
 
+  static TilePicture? _transparent;
+
+  /// Creates a fully transparent tile — used as the "no data" fallback for
+  /// transparent OVERLAY renderers so a missing/failed overlay tile shows the
+  /// layer below instead of an opaque placeholder grid.
+  Future<TilePicture> createTransparentBitmap() async {
+    if (_transparent != null) return _transparent!.clone();
+    // An empty recorded picture paints nothing → fully transparent tile.
+    var pictureRecorder = ui.PictureRecorder();
+    ui.Canvas(pictureRecorder);
+    var pic = pictureRecorder.endRecording();
+    _transparent = TilePicture.fromPicture(pic);
+    return _transparent!.clone();
+  }
+
   /// Creates a tile bitmap to display an error message.
   Future<TilePicture> createErrorBitmap(dynamic error) async {
     double tileSize = MapsforgeSettingsMgr().tileSize;

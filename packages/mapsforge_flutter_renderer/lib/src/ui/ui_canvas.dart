@@ -116,18 +116,31 @@ class UiCanvas {
   }
 
   /// draws the given [picture] at the specified position. Note that the picture is NOT disposed in this method.
-  void drawTilePicture({required TilePicture picture, required double left, required double top}) {
+  ///
+  /// [opacity] (0.0–1.0) blends the tile over whatever is already painted below;
+  /// 1.0 (default) paints fully opaque, unchanged from the original behaviour.
+  void drawTilePicture({required TilePicture picture, required double left, required double top, double opacity = 1.0}) {
+    final double a = opacity.clamp(0.0, 1.0);
     if (picture.getPicture() != null) {
       ui.Picture pic = picture.getPicture()!;
       _uiCanvas.save();
       _uiCanvas.translate(left, top);
       //double tileSize = MapsforgeConstants().tileSize;
       //_uiCanvas.clipRect(ui.Rect.fromLTWH(0, 0, tileSize, tileSize));
-      _uiCanvas.drawPicture(pic);
+      if (a < 1.0) {
+        // saveLayer with an alpha paint applies opacity to the whole picture.
+        // Null bounds lets the engine compute them (avoids a tileSize dependency).
+        _uiCanvas.saveLayer(null, ui.Paint()..color = ui.Color.fromRGBO(0, 0, 0, a));
+        _uiCanvas.drawPicture(pic);
+        _uiCanvas.restore();
+      } else {
+        _uiCanvas.drawPicture(pic);
+      }
       _uiCanvas.restore();
     } else {
       ui.Image image = picture.getImage()!; //await picture.convertPictureToImage()!;
-      _uiCanvas.drawImage(image, ui.Offset(left, top), ui.Paint());
+      // paint.color alpha multiplies the image opacity in drawImage.
+      _uiCanvas.drawImage(image, ui.Offset(left, top), ui.Paint()..color = ui.Color.fromRGBO(0, 0, 0, a));
     }
     ++_bitmapCount;
   }

@@ -22,15 +22,19 @@ class TileJobQueue extends ChangeNotifier {
 
   final Renderer renderer;
 
-  final _cache = LruCache<Tile, TilePicture?>(
-    onEvict: (tile, picture) {
-      picture?.dispose();
-    },
-    capacity: 2000,
-    name: "TileJobQueue",
-  );
+  // Initialised in the constructor so onEvict can close over `this` and
+  // guard against disposing tiles that are still painted by the current job.
+  late final LruCache<Tile, TilePicture?> _cache;
 
   _CurrentJob? _currentJob;
+
+  /// A job that has been prepared but not yet shown because we're waiting for
+  /// the first tile to arrive (so we never flash a blank screen on zoom).
+  _CurrentJob? _pendingJob;
+
+  /// Incremented on every position/size change; prefetch tasks bail out when
+  /// their captured version no longer matches, so they never delay real tiles.
+  int _prefetchVersion = 0;
 
   /// subscribe to renderChanged events which are triggered when the underlying renderdata has
   /// been changed, e.g. if a map has been added to a multimap. This should force a revalidation of the cache and
@@ -40,15 +44,33 @@ class TileJobQueue extends ChangeNotifier {
   /// Parallel task queue for tile loading optimization
   late final TaskQueue _taskQueue;
 
-  /// Maximum number of concurrent tile loading operations
-  static const int _maxConcurrentTiles = 4;
+  /// More concurrent workers = tiles appear faster after a zoom change.
+  static const int _maxConcurrentTiles = 10;
 
   TileJobQueue({required this.mapModel, required this.renderer}) {
+    _cache = LruCache<Tile, TilePicture?>(
+      onEvict: (tile, picture) {
+        if (picture == null) return;
+        // Do not dispose if the picture is still being painted by the
+        // current or pending job — that would crash the painter.
+        final inCurrent = _currentJob?.tileSet.images[tile] == picture;
+        final inPending = _pendingJob?.tileSet.images[tile] == picture;
+        if (!inCurrent && !inPending) {
+          picture.dispose();
+        }
+      },
+      capacity: 800,
+      name: "TileJobQueue",
+    );
+
     _taskQueue = ParallelTaskQueue(_maxConcurrentTiles);
 
     _renderChangedSubscription = mapModel.renderChangedStream.listen((RenderChangedEvent event) {
       // simple approach, clear all
       _cache.clear();
+      _prefetchVersion++;
+      _pendingJob?.abort();
+      _pendingJob = null;
       _CurrentJob? myJob = _currentJob;
       if (myJob != null) {
         _currentJob?.abort();
@@ -79,21 +101,29 @@ class TileJobQueue extends ChangeNotifier {
       return;
     }
     TileDimension tileDimension = TileHelper.calculateTiles(mapViewPosition: position, screensize: _size!);
-    // if (_currentJob?.tileDimension.contains(tileDimension) ?? false) {
-    //   if (_currentJob!._done) {
-    //     _emitTileSetBatched(_currentJob!.tileSet);
-    //   } else {
-    //     // same information to draw, previous job is still running, but we have to update the position anyway
-    //     _emitTileSetBatched(_currentJob!.tileSet);
-    //     return;
-    //   }
-    // }
-    _currentJob?.abort();
+
+    // Cancel any in-progress prefetch immediately so its queued tasks skip work.
+    _prefetchVersion++;
+
+    // Abort any job that was prepared but never shown; keep the currently
+    // displayed job alive so the map stays visible until first new tile arrives.
+    _pendingJob?.abort();
+    _pendingJob = null;
+
     unawaited(
       _positionEvent(position, tileDimension).catchError((error) {
         print(error);
       }),
     );
+  }
+
+  /// Promotes [job] from pending to current (aborting the old displayed job).
+  /// No-op if the job has already been superseded by a newer pending job.
+  void _promoteToCurrent(_CurrentJob job) {
+    if (_pendingJob != job) return; // superseded
+    _currentJob?.abort();
+    _currentJob = job;
+    _pendingJob = null;
   }
 
   @override
@@ -102,6 +132,8 @@ class TileJobQueue extends ChangeNotifier {
     _currentJob?.abort();
     _renderChangedSubscription.cancel();
     _taskQueue.cancel();
+    _pendingJob?.abort();
+    _pendingJob = null;
     _cache.dispose();
   }
 
@@ -111,6 +143,7 @@ class TileJobQueue extends ChangeNotifier {
   void setSize(double width, double height) {
     if (_size == null || _size!.width != width || _size!.height != height) {
       _size = MapSize(width: width, height: height);
+      _prefetchVersion++;
       MapPosition? position = _currentJob?.tileSet.mapPosition;
       if (position != null) {
         TileDimension tileDimension = TileHelper.calculateTiles(mapViewPosition: position, screensize: _size!);
@@ -132,7 +165,14 @@ class TileJobQueue extends ChangeNotifier {
     final session = PerformanceProfiler().startSession(category: "TileJobQueue");
     TileSet tileSet = TileSet(center: position.getCenter(), mapPosition: position);
     _CurrentJob myJob = _CurrentJob(tileDimension, tileSet);
-    _currentJob = myJob;
+    // Register as pending — do NOT replace _currentJob yet.
+    // Old tiles stay visible until we have something to show at the new position.
+    _pendingJob = myJob;
+
+    // Capture the prefetch version at the moment this job starts so prefetch
+    // tasks can tell if they've been superseded by a newer position event.
+    final int myPrefetchVersion = _prefetchVersion;
+
     List<Tile> tiles = _createTiles(mapPosition: position, tileDimension: tileDimension);
     List<Tile> missingTiles = [];
 
@@ -152,9 +192,11 @@ class TileJobQueue extends ChangeNotifier {
     }
     if (myJob._abort) return;
     if (tileSet.images.isNotEmpty) {
-      /// send the available tiles to ui with batching
+      // Have cached tiles — show immediately, replacing old display.
+      _promoteToCurrent(myJob);
       _emitTileSetBatched(tileSet);
     }
+    // If no cached tiles: old job keeps displaying until _producePicture promotes us.
 
     for (Tile tile in missingTiles) {
       unawaited(_taskQueue.add(() => _producePicture(myJob, tileSet, tile)));
@@ -162,6 +204,11 @@ class TileJobQueue extends ChangeNotifier {
     unawaited(
       _taskQueue.add(() async {
         myJob._done = true;
+        // Once all visible tiles for this zoom level are ready, speculatively
+        // render zoom±1 tiles so the next zoom is instant from cache.
+        if (!myJob._abort && _currentJob == myJob) {
+          unawaited(_prefetchAdjacentZooms(position, tileDimension, myPrefetchVersion));
+        }
       }),
     );
     session.complete();
@@ -175,7 +222,7 @@ class TileJobQueue extends ChangeNotifier {
         if (result.picture == null) {
           //return null;
           // print("No picture for tile $tile");
-          return ImageHelper().createNoDataBitmap();
+          return renderer.transparentOnMiss ? ImageHelper().createTransparentBitmap() : ImageHelper().createNoDataBitmap();
         }
         // make sure the picture is converted to an image because rendering (vector) pictures is usually slower than drawing images
         result.picture!.convertPictureToImage();
@@ -192,9 +239,106 @@ class TileJobQueue extends ChangeNotifier {
       tileSet.images[tile] = picture;
       //print("Added picture for tile $tile for renderer ${renderer.getRenderKey()}");
     } else {
-      tileSet.images[tile] = await ImageHelper().createNoDataBitmap();
+      tileSet.images[tile] =
+          await (renderer.transparentOnMiss ? ImageHelper().createTransparentBitmap() : ImageHelper().createNoDataBitmap());
     }
-    _emitTileSetBatched(tileSet);
+    // If this job was waiting (pending), promote it now that we have a tile —
+    // this is the moment the blank screen would appear; instead we show the
+    // first tile immediately and let the rest fill in.
+    if (_pendingJob == myJob) {
+      _promoteToCurrent(myJob);
+    }
+    // Only emit if this is now the current displayed job.
+    if (_currentJob == myJob) {
+      _emitTileSetBatched(tileSet);
+    }
+  }
+
+  /// Speculatively renders tiles for [zoomDiff] ±1 levels into the LRU cache
+  /// so that zoom transitions are served instantly on the next call.
+  Future<void> _prefetchAdjacentZooms(
+    MapPosition position,
+    TileDimension tileDimension,
+    int version,
+  ) async {
+    for (final int zoomDiff in const [-1]) {
+      if (_prefetchVersion != version) return;
+      final int targetZoom = position.zoomlevel + zoomDiff;
+      if (targetZoom < 1 || targetZoom > 22) continue;
+
+      final List<Tile> tiles = _tilesForAdjacentZoom(
+        baseDimension: tileDimension,
+        baseZoom: position.zoomlevel,
+        targetZoom: targetZoom,
+        indoorLevel: position.indoorLevel,
+      );
+
+      for (final Tile tile in tiles) {
+        if (_prefetchVersion != version) return;
+        try {
+          if (_cache.get(tile) != null) continue; // already in cache
+        } catch (_) {}
+        unawaited(_taskQueue.add(() => _prefetchTile(tile, version)));
+      }
+    }
+  }
+
+  /// Renders a single tile into the cache for prefetch purposes.
+  Future<void> _prefetchTile(Tile tile, int version) async {
+    if (_prefetchVersion != version) return;
+    try {
+      await _cache.getOrProduce(tile, (Tile t) async {
+        if (_prefetchVersion != version) return null;
+        try {
+          final JobResult result = await renderer.executeJob(JobRequest(t));
+          if (result.picture == null) {
+            return renderer.transparentOnMiss ? ImageHelper().createTransparentBitmap() : ImageHelper().createNoDataBitmap();
+          }
+          result.picture!.convertPictureToImage();
+          return result.picture!;
+        } catch (e, st) {
+          print(e);
+          print(st);
+          return renderer.transparentOnMiss ? ImageHelper().createTransparentBitmap() : ImageHelper().createNoDataBitmap();
+        }
+      });
+    } catch (_) {}
+  }
+
+  /// Returns the tiles at [targetZoom] that cover the same viewport as
+  /// [baseDimension] at [baseZoom], using only the fully-visible ("min") range.
+  List<Tile> _tilesForAdjacentZoom({
+    required TileDimension baseDimension,
+    required int baseZoom,
+    required int targetZoom,
+    required int indoorLevel,
+  }) {
+    final int diff = targetZoom - baseZoom;
+    int left, right, top, bottom;
+
+    if (diff > 0) {
+      // Zooming in: each base tile splits into 2^diff children.
+      final int mult = 1 << diff;
+      left = baseDimension.minLeft * mult;
+      right = (baseDimension.minRight + 1) * mult - 1;
+      top = baseDimension.minTop * mult;
+      bottom = (baseDimension.minBottom + 1) * mult - 1;
+    } else {
+      // Zooming out: 2^|diff| base tiles merge into one parent tile.
+      final int shift = -diff;
+      left = baseDimension.minLeft >> shift;
+      right = baseDimension.minRight >> shift;
+      top = baseDimension.minTop >> shift;
+      bottom = baseDimension.minBottom >> shift;
+    }
+
+    final List<Tile> tiles = [];
+    for (int tileY = top; tileY <= bottom; tileY++) {
+      for (int tileX = left; tileX <= right; tileX++) {
+        tiles.add(Tile(tileX, tileY, targetZoom, indoorLevel));
+      }
+    }
+    return tiles;
   }
 
   /// Emit tile set with batching to reduce stream emissions

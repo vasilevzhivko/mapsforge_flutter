@@ -1,3 +1,4 @@
+import 'dart:math';
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
@@ -15,6 +16,17 @@ class MapModel extends ChangeNotifier {
   MapPosition? _lastPosition;
 
   final ZoomlevelRange zoomlevelRange;
+
+  /// Optional geographic limit for the map. When set, panning is clamped so the
+  /// visible viewport can never leave this box — typically the offline map
+  /// file's own coverage, so the user can't swipe off into empty "No data"
+  /// tiles. Requires the view size (reported via [setViewSize]) to clamp the
+  /// viewport edges; until that arrives it falls back to clamping the centre.
+  final BoundingBox? boundingBox;
+
+  /// Last known view size in device pixels, reported by the tile view. Used to
+  /// keep the whole viewport (not just the centre) inside [boundingBox].
+  Size? _viewSize;
 
   /// Inform a listener about the last known position even if he was not listening at the time, hence using the [BehaviorSubject].
   final Subject<MapPosition> _positionSubject = BehaviorSubject<MapPosition>();
@@ -39,7 +51,7 @@ class MapModel extends ChangeNotifier {
 
   double get rotationDeg => _lastPosition?.rotation ?? 0.0;
 
-  MapModel({required Renderer renderer, this.zoomlevelRange = const ZoomlevelRange.standard()}) {
+  MapModel({required Renderer renderer, this.zoomlevelRange = const ZoomlevelRange.standard(), this.boundingBox}) {
     _renderers.add(renderer);
   }
 
@@ -67,6 +79,19 @@ class MapModel extends ChangeNotifier {
     _renderers.add(renderer);
   }
 
+  /// Inserts a renderer at [index] in the render stack. Renderers are painted in
+  /// list order, so index 0 renders first (bottom). Used to stack a custom base
+  /// tile source UNDER the vector datastore renderer.
+  void insertRenderer(int index, Renderer renderer) {
+    _renderers.insert(index.clamp(0, _renderers.length), renderer);
+  }
+
+  /// Removes [renderer] from the stack (does NOT dispose it). Returns true if it
+  /// was present.
+  bool removeRenderer(Renderer renderer) {
+    return _renderers.remove(renderer);
+  }
+
   List<Renderer> get renderers => _renderers;
 
   Iterable<Renderer> get labelRenderers => _renderers.where((test) => test.supportLabels());
@@ -80,10 +105,83 @@ class MapModel extends ChangeNotifier {
   }
 
   void setPosition(MapPosition position) {
+    position = _clampScaleToZoomRange(position);
+    position = _clampCenterToBounds(position);
     _lastPosition = position;
     _positionSubject.add(position);
     rotationNotifier.value = _normalize180(position.rotation);
     notifyListeners();
+  }
+
+  /// Reports the current view size (in device pixels) so [boundingBox] clamping
+  /// can keep the whole viewport — not just the centre — inside the bounds.
+  void setViewSize(double width, double height) {
+    if (width <= 0 || height <= 0) return;
+    _viewSize = Size(width, height);
+  }
+
+  /// Keeps the map inside [boundingBox] (if set) so panning can't reveal empty
+  /// "No data" tiles. When the view size is known the *viewport edges* are kept
+  /// inside the box (shifting the centre inward as needed); otherwise it falls
+  /// back to clamping just the centre. If the box is smaller than the viewport
+  /// on an axis, that axis is centred on the box.
+  MapPosition _clampCenterToBounds(MapPosition position) {
+    final BoundingBox? bb = boundingBox;
+    if (bb == null) return position;
+
+    final Size? view = _viewSize;
+    if (view == null) {
+      // No size yet — clamp the centre as a fallback.
+      final double lat = position.latitude.clamp(bb.minLatitude, bb.maxLatitude).toDouble();
+      final double lon = position.longitude.clamp(bb.minLongitude, bb.maxLongitude).toDouble();
+      if (lat == position.latitude && lon == position.longitude) return position;
+      return position.moveTo(lat, lon);
+    }
+
+    // Work in absolute world pixels at the current zoom. The box and the centre
+    // are projected into the same space; the centre is then constrained so the
+    // half-viewport on each side stays within the box.
+    final PixelProjection proj = PixelProjection(position.zoomlevel);
+    final double cx = proj.longitudeToPixelX(position.longitude);
+    final double cy = proj.latitudeToPixelY(position.latitude);
+
+    final double left = proj.longitudeToPixelX(bb.minLongitude);
+    final double right = proj.longitudeToPixelX(bb.maxLongitude);
+    // maxLatitude (north) maps to the smaller pixelY.
+    final double top = proj.latitudeToPixelY(bb.maxLatitude);
+    final double bottom = proj.latitudeToPixelY(bb.minLatitude);
+
+    // Use the raw half-viewport (scale == 1 reference). Dividing by the live
+    // pinch scale made the allowed centre shift between the gesture and its
+    // commit, which showed up as a jump near the edges while zooming.
+    final double halfW = view.width / 2;
+    final double halfH = view.height / 2;
+
+    final double newCx = (left + halfW > right - halfW)
+        ? (left + right) / 2 // box narrower than viewport → centre it
+        : cx.clamp(left + halfW, right - halfW).toDouble();
+    final double newCy = (top + halfH > bottom - halfH)
+        ? (top + bottom) / 2
+        : cy.clamp(top + halfH, bottom - halfH).toDouble();
+
+    if (newCx == cx && newCy == cy) return position;
+    return position.moveTo(proj.pixelYToLatitude(newCy), proj.pixelXToLongitude(newCx));
+  }
+
+  /// During a pinch the map is rendered at the integer [MapPosition.zoomlevel]
+  /// with a continuous [MapPosition.scale] factor, so the effective zoom is
+  /// `zoomlevel + log2(scale)`. A fast pinch-*out* (scale < 1) can drive that
+  /// below the configured minimum, and the renderer then has no tiles to show
+  /// ("No data available"); we clamp that. Pinch-*in* (scale > 1) is left
+  /// untouched — zooming in never produces empty tiles and the gesture's commit
+  /// already clamps the integer zoom to the max, so constraining it here only
+  /// fought the zoom-in animation near the maximum.
+  MapPosition _clampScaleToZoomRange(MapPosition position) {
+    if (position.scale >= 1.0) return position;
+    final int z = position.zoomlevel;
+    final double minScale = pow(2, zoomlevelRange.zoomlevelMin - z).toDouble();
+    if (position.scale >= minScale) return position;
+    return position.scaleAround(position.focalPoint, minScale);
   }
 
   double _normalize180(double deg) {
@@ -94,6 +192,8 @@ class MapModel extends ChangeNotifier {
   }
 
   MapPosition? get lastPosition => _lastPosition;
+
+  bool get isDisposed => _positionSubject.isClosed;
 
   Stream<MapPosition> get positionStream => _positionSubject.stream;
 
@@ -146,13 +246,13 @@ class MapModel extends ChangeNotifier {
   }
 
   void zoomIn() {
-    if (_lastPosition!.zoomlevel == zoomlevelRange.zoomlevelMax) return;
+    if (_lastPosition!.zoomlevel >= zoomlevelRange.zoomlevelMax) return;
     MapPosition newPosition = _lastPosition!.zoomIn();
     setPosition(newPosition);
   }
 
   void zoomInAround(double latitude, double longitude) {
-    if (_lastPosition!.zoomlevel == zoomlevelRange.zoomlevelMax) return;
+    if (_lastPosition!.zoomlevel >= zoomlevelRange.zoomlevelMax) return;
     MapPosition newPosition = _lastPosition!.zoomInAround(latitude, longitude);
     setPosition(newPosition);
   }

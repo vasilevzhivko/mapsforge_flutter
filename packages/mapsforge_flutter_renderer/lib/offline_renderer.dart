@@ -31,3 +31,4 @@ export 'src/memory_datastore.dart';
 export 'src/multimap_datastore.dart';
 export 'src/renderer.dart';
 export 'src/util/image_helper.dart';
+export 'src/xyz_tile_renderer.dart';

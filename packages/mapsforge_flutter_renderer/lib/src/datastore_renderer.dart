@@ -76,6 +76,9 @@ class IsolateDatastoreRenderer implements Renderer {
   bool supportLabels() {
     return true;
   }
+
+  @override
+  bool get transparentOnMiss => false;
 }
 
 //////////////////////////////////////////////////////////////////////////////
