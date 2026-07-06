@@ -30,6 +30,7 @@ export 'src/job/job_result.dart';
 export 'src/memory_datastore.dart';
 export 'src/multimap_datastore.dart';
 export 'src/renderer.dart';
+export 'src/solid_color_renderer.dart';
 export 'src/util/image_helper.dart';
 export 'src/custom_source_spec.dart';
 export 'src/custom_renderer_factory.dart';
