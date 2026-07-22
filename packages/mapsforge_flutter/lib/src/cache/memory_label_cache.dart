@@ -23,6 +23,15 @@ class MemoryLabelCache {
     }
   }
 
+  /// Total label-tile entries cached across all instances (for memory diagnostics).
+  static int liveTiles() {
+    var n = 0;
+    for (final c in _instances) {
+      n += c._cache.length;
+    }
+    return n;
+  }
+
   static void purgeCachesByBoundary(BoundingBox boundingBox) {
     for (MemoryLabelCache cache in _instances) {
       cache.purgeByBoundary(boundingBox);
@@ -30,7 +39,10 @@ class MemoryLabelCache {
   }
 
   MemoryLabelCache._() {
-    _cache = LruCache<Tile, RenderInfoCollection>(capacity: 500, name: "MemoryLabelCache");
+    // 200, not 500: a tile's RenderInfoCollection (all its labels + symbols)
+    // accumulates as you scroll, and 500 tiles' worth is a lot of retained
+    // label geometry on a dense map. 200 still covers several screens.
+    _cache = LruCache<Tile, RenderInfoCollection>(capacity: 200, name: "MemoryLabelCache");
   }
 
   void dispose() {

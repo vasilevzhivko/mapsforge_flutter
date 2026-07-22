@@ -21,12 +21,65 @@ class ScaleGestureDetector extends StatefulWidget {
 
 //////////////////////////////////////////////////////////////////////////////
 
-class _ScaleGestureDetectorState extends State<ScaleGestureDetector> {
+class _ScaleGestureDetectorState extends State<ScaleGestureDetector> with SingleTickerProviderStateMixin {
   static final _log = Logger('_Scale2GestureDetectorState');
 
   final bool doLog = false;
 
   _Handler? _handler;
+
+  late final AnimationController _snapController = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 150),
+  );
+  late final Animation<double> _snapProgress = CurvedAnimation(
+    parent: _snapController,
+    curve: Curves.easeOut,
+  );
+
+  // State for the current snap animation
+  double _snapFrom = 1.0;
+  double _snapTo = 1.0;
+  Offset _snapFocalPoint = Offset.zero;
+  VoidCallback? _snapCommit;
+
+  @override
+  void initState() {
+    super.initState();
+    _snapProgress.addListener(_onSnapTick);
+    _snapController.addStatusListener(_onSnapStatus);
+  }
+
+  @override
+  void dispose() {
+    _snapController.dispose();
+    super.dispose();
+  }
+
+  void _onSnapTick() {
+    final scale = _snapFrom + (_snapTo - _snapFrom) * _snapProgress.value;
+    widget.mapModel.scaleAround(_snapFocalPoint, scale);
+  }
+
+  void _onSnapStatus(AnimationStatus status) {
+    if (status != AnimationStatus.completed) return;
+    final commit = _snapCommit;
+    _snapCommit = null;
+    commit?.call();
+  }
+
+  void _animateSnapAndCommit({
+    required double fromScale,
+    required double toScale,
+    required Offset focalPoint,
+    required VoidCallback commit,
+  }) {
+    _snapFrom = fromScale;
+    _snapTo = toScale;
+    _snapFocalPoint = focalPoint;
+    _snapCommit = commit;
+    _snapController.forward(from: 0.0);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -37,7 +90,12 @@ class _ScaleGestureDetectorState extends State<ScaleGestureDetector> {
           onPointerDown: (event) {
             if (doLog) _log.info("onPointerDown $event ${event.pointer}");
             if (widget.mapModel.lastPosition == null) return;
-            _handler ??= _Handler(size: constraints.biggest, lastPosition: widget.mapModel.lastPosition!, mapModel: widget.mapModel);
+            _handler ??= _Handler(
+              size: constraints.biggest,
+              lastPosition: widget.mapModel.lastPosition!,
+              mapModel: widget.mapModel,
+              animateSnap: _animateSnapAndCommit,
+            );
             _handler!._addOffset(event.pointer, event.position);
           },
           onPointerMove: (event) {
@@ -64,11 +122,24 @@ class _ScaleGestureDetectorState extends State<ScaleGestureDetector> {
 //////////////////////////////////////////////////////////////////////////////
 
 class _Handler {
-  final MapPosition lastPosition;
+  /// Gesture-start position; rebased after every mid-gesture zoom commit.
+  MapPosition lastPosition;
 
   final MapModel mapModel;
 
   final Size size;
+
+  /// Scale already committed as zoom-level changes during this gesture
+  /// (powers of 2). The displayed scale is the raw pinch scale divided by
+  /// this, so the view stays continuous across mid-gesture commits.
+  double _committedFactor = 1;
+
+  final void Function({
+    required double fromScale,
+    required double toScale,
+    required Offset focalPoint,
+    required VoidCallback commit,
+  }) animateSnap;
 
   final Map<int, Offset> _points = {};
 
@@ -78,7 +149,12 @@ class _Handler {
 
   double _lastScale = 1;
 
-  _Handler({required this.lastPosition, required this.mapModel, required this.size});
+  _Handler({
+    required this.lastPosition,
+    required this.mapModel,
+    required this.size,
+    required this.animateSnap,
+  });
 
   void _addOffset(int id, Offset offset) {
     _points[id] = offset;
@@ -112,41 +188,75 @@ class _Handler {
     }
     _Vector newVector = _Vector(_points.values.first, _points.values.last);
     if (newVector.getLength().isNaN) return;
-    // if (_lastVector != null &&
-    //     (newVector.getLength() / _lastVector!.getLength() - 1).abs() < 0.01 &&
-    //     (newVector.getFocalPoint().dx - _lastVector!.getFocalPoint().dx).abs() < 5 &&
-    //     (newVector.getFocalPoint().dy - _lastVector!.getFocalPoint().dy).abs() < 5) {
-    //   // do not send tiny changes
-    //   return;
-    // }
-    _lastScale = newVector.getLength() / _startVector!.getLength();
-    mapModel.scaleAround(newVector.getFocalPoint(), _lastScale);
+    double effective = newVector.getLength() / _startVector!.getLength() / _committedFactor;
+    // Progressive commit (Google-Maps-style): once the pinch crosses a full
+    // zoom level, commit it NOW and rebase, so fresh tiles render DURING a
+    // long pinch instead of only at release — otherwise a deep pinch-out
+    // just shrinks the old tiles into a dot on the background.
+    if (effective >= 2.0 || effective <= 0.5) {
+      final int zoomLevelDiff = (log(effective) / log(2)).truncate();
+      final int achieved = _commitZoomStep(zoomLevelDiff, newVector.getFocalPoint());
+      if (achieved != 0) {
+        _committedFactor *= pow(2, achieved);
+        effective = newVector.getLength() / _startVector!.getLength() / _committedFactor;
+      }
+    }
+    _lastScale = effective;
+    mapModel.scaleAround(newVector.getFocalPoint(), effective);
     _lastVector = newVector;
+  }
+
+  /// Commits [zoomLevelDiff] levels around [focalPoint] mid-gesture, exactly
+  /// like the release commit. Returns the zoom delta actually achieved (the
+  /// model may clamp at its zoom bounds).
+  int _commitZoomStep(int zoomLevelDiff, Offset focalPoint) {
+    final num mult = pow(2, zoomLevelDiff);
+    final PositionInfo positionInfo = RotateHelper.normalize(lastPosition, size, focalPoint.dx, focalPoint.dy);
+    final int before = mapModel.lastPosition!.zoomlevel;
+    mapModel.zoomToAround(
+      positionInfo.latitude + (mapModel.lastPosition!.latitude - positionInfo.latitude) / mult,
+      positionInfo.longitude + (mapModel.lastPosition!.longitude - positionInfo.longitude) / mult,
+      before + zoomLevelDiff,
+    );
+    lastPosition = mapModel.lastPosition!;
+    return lastPosition.zoomlevel - before;
   }
 
   void _sendEnd() {
     // no zoom: 0, double zoom: 1, half zoom: -1
     double zoomLevelOffset = log(_lastScale) / log(2);
     int zoomLevelDiff = zoomLevelOffset.round();
+
+    // Fall back to screen centre if we never got a move event with 2 fingers
+    final focalPoint = _lastVector?.getFocalPoint() ?? Offset(size.width / 2, size.height / 2);
+
     if (zoomLevelDiff != 0) {
-      // Complete large zooms towards gesture direction
       num mult = pow(2, zoomLevelDiff);
-      // if (doLog)
-      //   _log.info("onScaleEnd zooming now zoomLevelDiff $zoomLevelDiff");
-      PositionInfo positionInfo = RotateHelper.normalize(lastPosition, size, _lastVector!.getFocalPoint().dx, _lastVector!.getFocalPoint().dy);
-      mapModel.zoomToAround(
-        positionInfo.latitude + (mapModel.lastPosition!.latitude - positionInfo.latitude) / mult,
-        positionInfo.longitude + (mapModel.lastPosition!.longitude - positionInfo.longitude) / mult,
-        mapModel.lastPosition!.zoomlevel + zoomLevelDiff,
+      double targetScale = pow(2, zoomLevelDiff).toDouble();
+      PositionInfo positionInfo = RotateHelper.normalize(lastPosition, size, focalPoint.dx, focalPoint.dy);
+
+      animateSnap(
+        fromScale: _lastScale,
+        toScale: targetScale,
+        focalPoint: focalPoint,
+        commit: () {
+          mapModel.zoomToAround(
+            positionInfo.latitude + (mapModel.lastPosition!.latitude - positionInfo.latitude) / mult,
+            positionInfo.longitude + (mapModel.lastPosition!.longitude - positionInfo.longitude) / mult,
+            mapModel.lastPosition!.zoomlevel + zoomLevelDiff,
+          );
+        },
       );
-      //      if (doLog) _log.info("onScaleEnd  resulting in ${newPost.toString()}");
     } else if (_lastScale != 1) {
-      // no significant zoom. Restore the old zoom
-      /*MapViewPosition newPost =*/
-      mapModel.zoomTo(mapModel.lastPosition!.zoomlevel);
-      // if (doLog)
-      //   _log.info(
-      //       "onScaleEnd Restored zoom to ${viewModel.mapViewPosition!.zoomLevel}");
+      // No significant zoom — animate back to original scale then restore zoom level
+      animateSnap(
+        fromScale: _lastScale,
+        toScale: 1.0,
+        focalPoint: focalPoint,
+        commit: () {
+          mapModel.zoomTo(mapModel.lastPosition!.zoomlevel);
+        },
+      );
     }
   }
 }

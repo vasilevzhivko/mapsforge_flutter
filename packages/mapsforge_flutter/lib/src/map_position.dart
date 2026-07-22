@@ -3,6 +3,7 @@ import 'dart:ui';
 
 import 'package:mapsforge_flutter_core/model.dart';
 import 'package:mapsforge_flutter_core/projection.dart';
+import 'package:mapsforge_flutter_core/utils.dart';
 
 /// Immutable position of the map
 class MapPosition {
@@ -60,31 +61,33 @@ class MapPosition {
       _projection = PixelProjection(zoomlevel);
 
   MapPosition zoomIn() {
+    final newZoom = min(zoomlevel + 1, MapsforgeSettingsMgr.defaultMaxZoomlevel);
     return MapPosition._(
       latitude: _latitude,
       longitude: _longitude,
-      zoomlevel: zoomlevel + 1,
+      zoomlevel: newZoom,
       indoorLevel: indoorLevel,
       rotation: _rotation,
       rotationRadian: _rotationRadian,
       scale: 1,
       focalPoint: null,
-      projection: PixelProjection(zoomlevel + 1),
+      projection: PixelProjection(newZoom),
     );
   }
 
   /// Zooms in around a specific latitude and longitude point.
   MapPosition zoomInAround(double latitude, double longitude) {
+    final newZoom = min(zoomlevel + 1, MapsforgeSettingsMgr.defaultMaxZoomlevel);
     return MapPosition._(
       latitude: latitude,
       longitude: longitude,
-      zoomlevel: zoomlevel + 1,
+      zoomlevel: newZoom,
       indoorLevel: indoorLevel,
       rotation: _rotation,
       rotationRadian: _rotationRadian,
       scale: 1,
       focalPoint: null,
-      projection: PixelProjection(zoomlevel + 1),
+      projection: PixelProjection(newZoom),
     );
   }
 

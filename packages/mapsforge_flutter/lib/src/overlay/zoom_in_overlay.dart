@@ -1,29 +1,53 @@
-import 'package:flutter/cupertino.dart';
+import 'package:flutter/material.dart';
 import 'package:mapsforge_flutter/mapsforge.dart';
 import 'package:mapsforge_flutter/src/util/mapsforge_stream_builder.dart';
 
-/// Listens to double-tap events on the map and zooms in around the position of the double tap. The listening event is configurable.
-class ZoomInOverlay extends StatelessWidget {
+/// Listens to double-tap events on the map and zooms in with a smooth
+/// Google-Maps-style animation: the scale eases 1→2 while the center glides
+/// toward the tapped point, ending pixel-identical to the committed zoom.
+class ZoomInOverlay extends StatefulWidget {
   final MapModel mapModel;
-
   final TapEventListener tapEventListener;
 
-  const ZoomInOverlay({super.key, required this.mapModel, this.tapEventListener = TapEventListener.doubleTap});
+  const ZoomInOverlay({
+    super.key,
+    required this.mapModel,
+    this.tapEventListener = TapEventListener.doubleTap,
+  });
+
+  @override
+  State<ZoomInOverlay> createState() => _ZoomInOverlayState();
+}
+
+class _ZoomInOverlayState extends State<ZoomInOverlay>
+    with SingleTickerProviderStateMixin {
+  late final ZoomAnimator _animator =
+      ZoomAnimator(mapModel: widget.mapModel, vsync: this);
+
+  @override
+  void dispose() {
+    _animator.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return MapsforgeStreamBuilder(
-      stream: tapEventListener.getStream(mapModel),
+      stream: widget.tapEventListener.getStream(widget.mapModel),
       builder: (BuildContext context, TapEvent? event) {
         if (event == null) return const SizedBox();
-        // zoomin around the position of the tap would bring the tap-position to the center and zooming around the new center.
-        // Instead we want to zoom so that the tap-position stays at the same position in the ui and everything around it zooms.
-        MapPosition lastPosition = mapModel.lastPosition!;
+
+        final lastPosition = widget.mapModel.lastPosition!;
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          // We are in a Streambuilder and zoomIn requests rebuilding the ui. We would get "setState() or markNeedsBuild() called when widget tree was locked".
-          mapModel.zoomInAround(
-            (event.latitude - lastPosition.latitude) / 2 + lastPosition.latitude,
-            (event.longitude - lastPosition.longitude) / 2 + lastPosition.longitude,
+          if (!mounted) return;
+          // Glide the center halfway toward the tapped location (the classic
+          // double-tap behaviour). A second tap mid-animation commits the
+          // running zoom instantly and chains from there.
+          _animator.animateZoomIn(
+            (event.latitude - lastPosition.latitude) / 2 +
+                lastPosition.latitude,
+            (event.longitude - lastPosition.longitude) / 2 +
+                lastPosition.longitude,
           );
         });
         return const SizedBox();

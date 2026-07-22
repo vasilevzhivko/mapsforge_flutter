@@ -1,11 +1,12 @@
 import 'dart:async';
+import 'dart:math' as math;
 
-import 'package:ecache/ecache.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:mapsforge_flutter/mapsforge.dart';
 import 'package:mapsforge_flutter/src/tile/tile_dimension.dart';
 import 'package:mapsforge_flutter/src/tile/tile_set.dart';
 import 'package:mapsforge_flutter/src/util/tile_helper.dart';
+import 'package:mapsforge_flutter_core/cache.dart';
 import 'package:mapsforge_flutter_core/model.dart';
 import 'package:mapsforge_flutter_core/task_queue.dart';
 import 'package:mapsforge_flutter_core/utils.dart';
@@ -24,13 +25,20 @@ class TileJobQueue extends ChangeNotifier {
 
   // Initialised in the constructor so onEvict can close over `this` and
   // guard against disposing tiles that are still painted by the current job.
-  late final LruCache<Tile, TilePicture?> _cache;
+  // Byte-bounded: this layer's share of the global tile-bitmap budget.
+  late final WeightedLruCache<Tile, TilePicture?> _cache;
 
   _CurrentJob? _currentJob;
 
   /// A job that has been prepared but not yet shown because we're waiting for
   /// the first tile to arrive (so we never flash a blank screen on zoom).
   _CurrentJob? _pendingJob;
+
+  /// The previously displayed job, kept while the current one is still
+  /// filling after a ZOOM change. The painter draws its tiles scaled
+  /// underneath the current set so edges show stretched old-zoom imagery
+  /// instead of blank flicker. Cleared once the current set is complete.
+  _CurrentJob? _previousJob;
 
   /// Incremented on every position/size change; prefetch tasks bail out when
   /// their captured version no longer matches, so they never delay real tiles.
@@ -47,30 +55,53 @@ class TileJobQueue extends ChangeNotifier {
   /// More concurrent workers = tiles appear faster after a zoom change.
   static const int _maxConcurrentTiles = 10;
 
+  /// Pictures no longer owned by the cache (evicted while still displayed, or
+  /// never cached at all like per-tileSet miss bitmaps). They stay alive while
+  /// a current/pending tileSet references them and are disposed by
+  /// [_sweepZombies] as soon as no tileSet does.
+  final Set<TilePicture> _zombies = {};
+
+  /// All live tile job queues across every map view and layer. Each cache only
+  /// bounds its own share, so stacked overlays and background map views would
+  /// otherwise multiply the global budget — [_enforceGlobalTileBudget] evicts
+  /// across all of them.
+  static final Set<TileJobQueue> _instances = {};
+
   TileJobQueue({required this.mapModel, required this.renderer}) {
-    _cache = LruCache<Tile, TilePicture?>(
+    _cache = WeightedLruCache<Tile, TilePicture?>(
+      maxWeightBytes: math.max(1 << 20, (renderer.tileCacheShare * MapsforgeSettingsMgr().tileBitmapBudgetBytes).round()),
+      // Picture-backed tiles (miss placeholders) have no pixels — charge a
+      // token weight so they still count as entries.
+      weigher: (TilePicture? picture) => picture == null ? 64 : math.max(64, picture.imageWidth * picture.imageHeight * 4),
       onEvict: (tile, picture) {
         if (picture == null) return;
         // Do not dispose if the picture is still being painted by the
-        // current or pending job — that would crash the painter.
+        // current, pending or previous (zoom-underlay) job — park it in the
+        // zombie list instead so it gets disposed once it leaves the screen.
         final inCurrent = _currentJob?.tileSet.images[tile] == picture;
         final inPending = _pendingJob?.tileSet.images[tile] == picture;
-        if (!inCurrent && !inPending) {
-          picture.dispose();
+        final inPrevious = _previousJob?.tileSet.images[tile] == picture;
+        if (inCurrent || inPending || inPrevious) {
+          _zombies.add(picture);
+        } else {
+          _disposePicture(picture);
         }
       },
-      capacity: 800,
-      name: "TileJobQueue",
     );
 
     _taskQueue = ParallelTaskQueue(_maxConcurrentTiles);
+    _instances.add(this);
 
     _renderChangedSubscription = mapModel.renderChangedStream.listen((RenderChangedEvent event) {
       // simple approach, clear all
       _cache.clear();
       _prefetchVersion++;
+      _taskQueue.clear();
       _pendingJob?.abort();
       _pendingJob = null;
+      // The underlay was rendered with the old theme/data — drop it.
+      _previousJob = null;
+      _sweepZombies();
       _CurrentJob? myJob = _currentJob;
       if (myJob != null) {
         _currentJob?.abort();
@@ -80,6 +111,65 @@ class TileJobQueue extends ChangeNotifier {
           }),
         );
       }
+    });
+  }
+
+  /// Disposes [picture] and updates the live-bitmap accounting.
+  void _disposePicture(TilePicture picture) {
+    TileImageStats.remove(picture.imageWidth, picture.imageHeight);
+    picture.dispose();
+  }
+
+  /// Drops every cached tile bitmap across ALL live map views and layers —
+  /// the memory-pressure escape hatch (`didHaveMemoryPressure`). Tiles still
+  /// on screen keep displaying via the zombie mechanism and everything
+  /// re-renders lazily; the only cost is extra work after the warning, far
+  /// cheaper than an OOM kill.
+  static void purgeAllTileCaches() {
+    for (final TileJobQueue queue in _instances) {
+      queue._cache.clear();
+      queue._sweepZombies();
+    }
+  }
+
+  /// Enforces [MapsforgeSettingsMgr.tileBitmapBudgetBytes] as a TRUE global
+  /// budget across every live layer and map view: evicts LRU tiles from the
+  /// heaviest cache until the summed weight fits, stopping when every cache is
+  /// at its min-entries (one screenful) floor. Cross-cache eviction is safe —
+  /// each queue's onEvict/zombie logic protects its displayed tiles.
+  static void _enforceGlobalTileBudget() {
+    final int budget = MapsforgeSettingsMgr().tileBitmapBudgetBytes;
+    int total = 0;
+    for (final TileJobQueue queue in _instances) {
+      total += queue._cache.totalWeight;
+    }
+    while (total > budget) {
+      final List<TileJobQueue> byWeight = _instances.toList()..sort((a, b) => b._cache.totalWeight.compareTo(a._cache.totalWeight));
+      bool evicted = false;
+      for (final TileJobQueue queue in byWeight) {
+        final int before = queue._cache.totalWeight;
+        if (queue._cache.evictOldest()) {
+          total -= before - queue._cache.totalWeight;
+          evicted = true;
+          break;
+        }
+      }
+      // Every cache is at its one-screenful floor — nothing more to reclaim.
+      if (!evicted) return;
+    }
+  }
+
+  /// Disposes every zombie picture that is no longer referenced by the
+  /// current or pending tileSet.
+  void _sweepZombies() {
+    if (_zombies.isEmpty) return;
+    _zombies.removeWhere((picture) {
+      final bool referenced =
+          (_currentJob?.tileSet.images.containsValue(picture) ?? false) ||
+          (_pendingJob?.tileSet.images.containsValue(picture) ?? false) ||
+          (_previousJob?.tileSet.images.containsValue(picture) ?? false);
+      if (!referenced) _disposePicture(picture);
+      return !referenced;
     });
   }
 
@@ -105,10 +195,15 @@ class TileJobQueue extends ChangeNotifier {
     // Cancel any in-progress prefetch immediately so its queued tasks skip work.
     _prefetchVersion++;
 
+    // Drop queued (not yet started) render tasks — they belong to a stale
+    // position and would only waste CPU before bailing on their abort flag.
+    _taskQueue.clear();
+
     // Abort any job that was prepared but never shown; keep the currently
     // displayed job alive so the map stays visible until first new tile arrives.
     _pendingJob?.abort();
     _pendingJob = null;
+    _sweepZombies();
 
     unawaited(
       _positionEvent(position, tileDimension).catchError((error) {
@@ -121,29 +216,83 @@ class TileJobQueue extends ChangeNotifier {
   /// No-op if the job has already been superseded by a newer pending job.
   void _promoteToCurrent(_CurrentJob job) {
     if (_pendingJob != job) return; // superseded
-    _currentJob?.abort();
+    final _CurrentJob? old = _currentJob;
+    old?.abort();
     _currentJob = job;
     _pendingJob = null;
+    // On a ZOOM change, keep an old set as a scaled underlay until the new
+    // one is complete — otherwise the edges (rendered last) flicker blank.
+    // On multi-level jumps or rapid chained zooms the outgoing job may itself
+    // be nearly empty, so keep whichever underlay COVERS more of the new view
+    // rather than blindly the latest one.
+    if (job.tileSet.images.length >= job._expectedTiles) {
+      _previousJob = null;
+    } else if (old != null && old.tileSet.images.isNotEmpty && old.tileSet.mapPosition.zoomlevel != job.tileSet.mapPosition.zoomlevel) {
+      if (_previousJob == null || _underlayScore(old, job) >= _underlayScore(_previousJob!, job)) {
+        _previousJob = old;
+      }
+    }
+    // else: keep the existing underlay (still valid for this zoom).
+    // Tiles referenced only by dropped jobs can be released now.
+    _sweepZombies();
+  }
+
+  /// How much of [job]'s viewport the tiles of [prev], scaled to [job]'s
+  /// zoom, can cover (0..1). Zoomed-in underlays are magnified and can cover
+  /// everything; zoomed-out ones shrink quadratically per level.
+  static double _underlayScore(_CurrentJob prev, _CurrentJob job) {
+    final int dz = job.tileSet.mapPosition.zoomlevel - prev.tileSet.mapPosition.zoomlevel;
+    final double f = dz >= 0 ? (1 << dz).toDouble() : 1.0 / (1 << -dz);
+    final double area = f >= 1 ? 1 : f * f;
+    final double fill = prev._expectedTiles > 0 ? prev.tileSet.images.length / prev._expectedTiles : 0;
+    return area * (fill > 1 ? 1 : fill);
+  }
+
+  /// Drops the zoom-underlay once [job] (the current job) is fully rendered.
+  void _releaseUnderlayIfComplete(_CurrentJob job) {
+    if (_previousJob == null || _currentJob != job) return;
+    if (job.tileSet.images.length >= job._expectedTiles) {
+      _previousJob = null;
+      _sweepZombies();
+    }
   }
 
   @override
   void dispose() {
     super.dispose();
-    _currentJob?.abort();
+    _instances.remove(this);
     _renderChangedSubscription.cancel();
     _taskQueue.cancel();
+    _currentJob?.abort();
     _pendingJob?.abort();
+    // Drop the tileSets first so the cache's onEvict sees no references and
+    // disposes every cached picture; everything not cache-owned is a zombie.
+    _currentJob = null;
     _pendingJob = null;
+    _previousJob = null;
     _cache.dispose();
+    for (final TilePicture picture in _zombies) {
+      _disposePicture(picture);
+    }
+    _zombies.clear();
   }
 
   TileSet? get tileSet => _currentJob?.tileSet;
+
+  /// Old-zoom tiles to paint (scaled) underneath [tileSet] while it is still
+  /// filling after a zoom change, or null when the current set is complete.
+  TileSet? get previousTileSet => _previousJob?.tileSet;
 
   /// Sets the current size of the mapview so that we know which and how many tiles we need for the whole view
   void setSize(double width, double height) {
     if (_size == null || _size!.width != width || _size!.height != height) {
       _size = MapSize(width: width, height: height);
+      // Never evict below one screenful of tiles plus a 1-tile ring — a byte
+      // budget smaller than the viewport would otherwise thrash visible tiles.
+      final double tileSize = MapsforgeSettingsMgr().tileSize;
+      _cache.minEntries = ((width / tileSize).ceil() + 2) * ((height / tileSize).ceil() + 2);
       _prefetchVersion++;
+      _taskQueue.clear();
       MapPosition? position = _currentJob?.tileSet.mapPosition;
       if (position != null) {
         TileDimension tileDimension = TileHelper.calculateTiles(mapViewPosition: position, screensize: _size!);
@@ -174,7 +323,17 @@ class TileJobQueue extends ChangeNotifier {
     final int myPrefetchVersion = _prefetchVersion;
 
     List<Tile> tiles = _createTiles(mapPosition: position, tileDimension: tileDimension);
+    myJob._expectedTiles = tiles.length;
     List<Tile> missingTiles = [];
+
+    // Tiles currently on screen — carry them forward so the layer never shows
+    // FEWER tiles than it already does. A Tile key includes the zoom level, so
+    // this only reuses same-zoom tiles (a pan): their content is identical, so
+    // the reused picture is correct and we don't even re-render it. On a zoom
+    // change no old key matches, so nothing is carried (correct). Without this,
+    // promoting a partially-cached new set dropped the visible tiles and a
+    // transparent overlay (hillshade) flickered on every small move.
+    final Map<Tile, TilePicture> displayed = _currentJob?.tileSet.images ?? const {};
 
     // retrieve all available tiles from cache
     for (Tile tile in tiles) {
@@ -182,21 +341,35 @@ class TileJobQueue extends ChangeNotifier {
         TilePicture? picture = _cache.get(tile);
         if (picture != null) {
           tileSet.images[tile] = picture;
+        } else if (displayed.containsKey(tile)) {
+          // Still-valid on-screen tile the cache has evicted — keep showing it.
+          tileSet.images[tile] = displayed[tile]!;
         } else {
           missingTiles.add(tile);
         }
       } catch (error) {
         // previous tile generation not yet done or another error occured, check in the second pass
-        missingTiles.add(tile);
+        if (displayed.containsKey(tile)) {
+          tileSet.images[tile] = displayed[tile]!;
+        } else {
+          missingTiles.add(tile);
+        }
       }
     }
     if (myJob._abort) return;
-    if (tileSet.images.isNotEmpty) {
-      // Have cached tiles — show immediately, replacing old display.
+    final bool zoomChanged = _currentJob != null && _currentJob!.tileSet.mapPosition.zoomlevel != position.zoomlevel;
+    if (tileSet.images.isNotEmpty || zoomChanged) {
+      // Show immediately when we have cached tiles — or on a ZOOM change even
+      // with an empty set: waiting for the first tile would draw the old-zoom
+      // tileSet against the new position's transform (a visible snap-back
+      // flash); promoting now lets the painter draw the old tiles as a
+      // correctly scaled underlay instead while the new tiles arrive.
       _promoteToCurrent(myJob);
+      _releaseUnderlayIfComplete(myJob);
       _emitTileSetBatched(tileSet);
     }
-    // If no cached tiles: old job keeps displaying until _producePicture promotes us.
+    // Same-zoom with nothing to show (e.g. theme change cleared the cache):
+    // old job keeps displaying until _producePicture promotes us.
 
     for (Tile tile in missingTiles) {
       unawaited(_taskQueue.add(() => _producePicture(myJob, tileSet, tile)));
@@ -205,8 +378,13 @@ class TileJobQueue extends ChangeNotifier {
       _taskQueue.add(() async {
         myJob._done = true;
         // Once all visible tiles for this zoom level are ready, speculatively
-        // render zoom±1 tiles so the next zoom is instant from cache.
-        if (!myJob._abort && _currentJob == myJob) {
+        // render zoom±1 tiles so the next zoom is instant from cache. Skipped
+        // for renderers that opt out (e.g. a lightweight overlay with a small
+        // cache — prefetched off-zoom tiles would evict the visible ones and
+        // make the layer flicker while panning).
+        if (renderer.prefetchAdjacentZooms &&
+            !myJob._abort &&
+            _currentJob == myJob) {
           unawaited(_prefetchAdjacentZooms(position, tileDimension, myPrefetchVersion));
         }
       }),
@@ -222,10 +400,13 @@ class TileJobQueue extends ChangeNotifier {
         if (result.picture == null) {
           //return null;
           // print("No picture for tile $tile");
-          return renderer.transparentOnMiss ? ImageHelper().createTransparentBitmap() : ImageHelper().createNoDataBitmap();
+          final miss = await (renderer.transparentOnMiss ? ImageHelper().createTransparentBitmap() : ImageHelper().createNoDataBitmap());
+          TileImageStats.add(miss.imageWidth, miss.imageHeight);
+          return miss;
         }
         // make sure the picture is converted to an image because rendering (vector) pictures is usually slower than drawing images
-        result.picture!.convertPictureToImage();
+        result.picture!.rasterize();
+        TileImageStats.add(result.picture!.imageWidth, result.picture!.imageHeight);
         return result.picture!;
       } catch (error, stacktrace) {
         // error in ecache abort() method. The completer should be checked for isComplete() before injecting an exception
@@ -236,20 +417,31 @@ class TileJobQueue extends ChangeNotifier {
     });
     if (myJob._abort) return;
     if (picture != null) {
+      // If the cache refused ownership (oversized entry) the picture would
+      // otherwise never be disposed — track it as a zombie. Idempotent for
+      // pictures the cache evicted into the zombie list already.
+      if (!_cache.containsKey(tile)) _zombies.add(picture);
       tileSet.images[tile] = picture;
+      _enforceGlobalTileBudget();
       //print("Added picture for tile $tile for renderer ${renderer.getRenderKey()}");
     } else {
-      tileSet.images[tile] =
-          await (renderer.transparentOnMiss ? ImageHelper().createTransparentBitmap() : ImageHelper().createNoDataBitmap());
+      final TilePicture miss = await (renderer.transparentOnMiss ? ImageHelper().createTransparentBitmap() : ImageHelper().createNoDataBitmap());
+      TileImageStats.add(miss.imageWidth, miss.imageHeight);
+      // Never cache-owned — register as zombie so the sweep disposes it once
+      // this tileSet leaves the screen.
+      _zombies.add(miss);
+      tileSet.images[tile] = miss;
     }
     // If this job was waiting (pending), promote it now that we have a tile —
     // this is the moment the blank screen would appear; instead we show the
-    // first tile immediately and let the rest fill in.
+    // first tile immediately and let the rest fill in (the previous zoom's
+    // tiles stay painted underneath until we're complete).
     if (_pendingJob == myJob) {
       _promoteToCurrent(myJob);
     }
     // Only emit if this is now the current displayed job.
     if (_currentJob == myJob) {
+      _releaseUnderlayIfComplete(myJob);
       _emitTileSetBatched(tileSet);
     }
   }
@@ -287,21 +479,31 @@ class TileJobQueue extends ChangeNotifier {
   Future<void> _prefetchTile(Tile tile, int version) async {
     if (_prefetchVersion != version) return;
     try {
-      await _cache.getOrProduce(tile, (Tile t) async {
+      final TilePicture? produced = await _cache.getOrProduce(tile, (Tile t) async {
         if (_prefetchVersion != version) return null;
+        TilePicture picture;
         try {
           final JobResult result = await renderer.executeJob(JobRequest(t));
           if (result.picture == null) {
-            return renderer.transparentOnMiss ? ImageHelper().createTransparentBitmap() : ImageHelper().createNoDataBitmap();
+            picture = await (renderer.transparentOnMiss ? ImageHelper().createTransparentBitmap() : ImageHelper().createNoDataBitmap());
+          } else {
+            result.picture!.rasterize();
+            picture = result.picture!;
           }
-          result.picture!.convertPictureToImage();
-          return result.picture!;
         } catch (e, st) {
           print(e);
           print(st);
-          return renderer.transparentOnMiss ? ImageHelper().createTransparentBitmap() : ImageHelper().createNoDataBitmap();
+          picture = await (renderer.transparentOnMiss ? ImageHelper().createTransparentBitmap() : ImageHelper().createNoDataBitmap());
         }
+        TileImageStats.add(picture.imageWidth, picture.imageHeight);
+        return picture;
       });
+      // A prefetched picture the cache refused (oversized) is referenced by
+      // nothing — dispose it via the zombie sweep.
+      if (produced != null && !_cache.containsKey(tile)) {
+        _zombies.add(produced);
+      }
+      _enforceGlobalTileBudget();
     } catch (_) {}
   }
 
@@ -398,6 +600,10 @@ class _CurrentJob {
   final TileDimension tileDimension;
 
   final TileSet tileSet;
+
+  /// Total number of tiles this job will produce; used to detect completion
+  /// (when the zoom-underlay of the previous job can be released).
+  int _expectedTiles = 0;
 
   bool _done = false;
 

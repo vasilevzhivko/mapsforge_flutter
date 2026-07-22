@@ -20,7 +20,7 @@ class LabelJobQueue extends ChangeNotifier {
 
   final MemoryLabelCache _cache = MemoryLabelCache.create();
 
-  static _CurrentJob? _currentJob;
+  _CurrentJob? _currentJob;
 
   late final StreamSubscription<RenderChangedEvent> _renderChangedSubscription;
 
@@ -41,6 +41,7 @@ class LabelJobQueue extends ChangeNotifier {
     _renderChangedSubscription = mapModel.renderChangedStream.listen((RenderChangedEvent event) {
       // simple approach, clear all
       _cache.purgeAll();
+      _taskQueue.clear();
       _CurrentJob? myJob = _currentJob;
       if (myJob != null) {
         _currentJob?.abort();
@@ -79,6 +80,8 @@ class LabelJobQueue extends ChangeNotifier {
     //     return;
     //   }
     // }
+    // Drop queued (not yet started) label tasks for the stale position.
+    _taskQueue.clear();
     _currentJob?.abort();
     unawaited(_positionEvent(position, tileDimension));
   }
@@ -88,6 +91,7 @@ class LabelJobQueue extends ChangeNotifier {
     super.dispose();
     _currentJob?.abort();
     _renderChangedSubscription.cancel();
+    _taskQueue.cancel();
     _cache.dispose();
   }
 
@@ -97,6 +101,7 @@ class LabelJobQueue extends ChangeNotifier {
       _size = MapSize(width: width, height: height);
       if (mapModel.lastPosition != null) {
         TileDimension tileDimension = TileHelper.calculateTiles(mapViewPosition: mapModel.lastPosition!, screensize: _size!);
+        _taskQueue.clear();
         _currentJob?.abort();
         unawaited(_positionEvent(mapModel.lastPosition!, tileDimension));
       }

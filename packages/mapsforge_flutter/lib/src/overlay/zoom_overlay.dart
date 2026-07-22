@@ -23,11 +23,13 @@ class ZoomOverlay extends StatefulWidget {
 
 /////////////////////////////////////////////////////////////////////////////
 
-class _ZoomOverlayState extends State<ZoomOverlay> with SingleTickerProviderStateMixin {
+class _ZoomOverlayState extends State<ZoomOverlay> with TickerProviderStateMixin {
   final double toolbarSpacing = 15;
 
   late AnimationController _fadeAnimationController;
   late CurvedAnimation _fadeAnimation;
+
+  late final ZoomAnimator _zoomAnimator = ZoomAnimator(mapModel: widget.mapModel, vsync: this);
 
   @override
   void initState() {
@@ -46,6 +48,7 @@ class _ZoomOverlayState extends State<ZoomOverlay> with SingleTickerProviderStat
   @override
   void dispose() {
     _fadeAnimationController.dispose();
+    _zoomAnimator.dispose();
     super.dispose();
   }
 
@@ -81,7 +84,7 @@ class _ZoomOverlayState extends State<ZoomOverlay> with SingleTickerProviderStat
             RawMaterialButton(
               onPressed: () {
                 if (widget.mapModel.lastPosition == null) return;
-                widget.mapModel.zoomIn();
+                _zoomAnimator.animateZoomInCentered();
               },
               elevation: 2.0,
               fillColor: fillColor,
@@ -95,7 +98,7 @@ class _ZoomOverlayState extends State<ZoomOverlay> with SingleTickerProviderStat
             RawMaterialButton(
               onPressed: () {
                 if (widget.mapModel.lastPosition == null) return;
-                widget.mapModel.zoomOut();
+                _zoomAnimator.animateZoomOut();
               },
               elevation: 2.0,
               fillColor: fillColor,
