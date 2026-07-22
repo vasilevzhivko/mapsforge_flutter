@@ -1,5 +1,18 @@
 import 'dart:math';
 
+/// Preset memory budgets for the caches, selectable by the app at startup
+/// depending on the device class (see [MapsforgeSettingsMgr.setMemoryProfile]).
+enum MemoryProfile {
+  /// Old/low-RAM phones: 16MB mapfile block cache, 32MB rendered-tile budget.
+  low,
+
+  /// Default: 32MB block cache, 64MB rendered-tile budget.
+  normal,
+
+  /// Plenty of RAM: 64MB block cache, 128MB rendered-tile budget.
+  high,
+}
+
 /// Singleton settings manager for Mapsforge rendering configuration.
 ///
 /// This class manages global settings that affect map rendering behavior,
@@ -70,6 +83,32 @@ class MapsforgeSettingsMgr {
   /// Default maximum zoom level supported by the rendering system.
   /// Can be overridden by specific map implementations.
   static const int defaultMaxZoomlevel = 25;
+
+  /// Byte budget for a mapfile's block cache (raw data blocks read from the
+  /// .map file). Set via [setMemoryProfile] or directly, BEFORE opening a
+  /// mapfile — the value is read when the cache is created.
+  int blockCacheBytes = 32 << 20;
+
+  /// Global byte budget for rendered tile bitmaps, shared by all tile layers
+  /// (each layer takes its `tileCacheShare` of this). Set via
+  /// [setMemoryProfile] or directly, BEFORE creating the map widget.
+  int tileBitmapBudgetBytes = 64 << 20;
+
+  /// Applies the cache budgets of [profile]. Call at app startup, before any
+  /// mapfile or map widget is created.
+  void setMemoryProfile(MemoryProfile profile) {
+    switch (profile) {
+      case MemoryProfile.low:
+        blockCacheBytes = 16 << 20;
+        tileBitmapBudgetBytes = 32 << 20;
+      case MemoryProfile.normal:
+        blockCacheBytes = 32 << 20;
+        tileBitmapBudgetBytes = 64 << 20;
+      case MemoryProfile.high:
+        blockCacheBytes = 64 << 20;
+        tileBitmapBudgetBytes = 128 << 20;
+    }
+  }
 
   factory MapsforgeSettingsMgr() {
     if (_instance != null) return _instance!;

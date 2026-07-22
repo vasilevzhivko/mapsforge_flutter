@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:collection';
 import 'dart:io';
 import 'dart:math' as math;
@@ -16,6 +17,11 @@ class ReadbufferFile implements ReadbufferSource {
 
   /// ressource for a specific position
   final Queue<_ReadbufferFileResource> _resourceAts = Queue();
+
+  /// Upper bound for pooled file handles. The pool historically grew to the
+  /// peak read concurrency (10+ per mapfile) and never shrank; handles beyond
+  /// this bound are closed instead of returned to the pool.
+  static const int _maxPooledResources = 4;
 
   /// The filename of the underlying file
   final String filename;
@@ -73,11 +79,14 @@ class ReadbufferFile implements ReadbufferSource {
 
     var session = PerformanceProfiler().startSession(category: "ReadbufferFile.readAt");
     _ReadbufferFileResource resourceAt = _resourceAts.isNotEmpty ? _resourceAts.removeFirst() : _ReadbufferFileResource(filename);
-    Uint8List bufferData = await resourceAt.readAt(position, length);
-    _resourceAts.addLast(resourceAt);
-    Readbuffer result = Readbuffer(bufferData, position);
-    session.complete();
-    return result;
+    try {
+      Uint8List bufferData = await resourceAt.readAt(position, length);
+      Readbuffer result = Readbuffer(bufferData, position);
+      session.complete();
+      return result;
+    } finally {
+      _releaseResource(resourceAt);
+    }
   }
 
   @override
@@ -87,22 +96,37 @@ class ReadbufferFile implements ReadbufferSource {
 
     var session = PerformanceProfiler().startSession(category: "ReadbufferFile.readAt");
     _ReadbufferFileResource resourceAt = _resourceAts.isNotEmpty ? _resourceAts.removeFirst() : _ReadbufferFileResource(filename);
-    Uint8List bufferData = await resourceAt.readAtMax(position, maxLength);
-    _resourceAts.addLast(resourceAt);
-    Readbuffer result = Readbuffer(bufferData, position);
-    session.complete();
-    return result;
+    try {
+      Uint8List bufferData = await resourceAt.readAtMax(position, maxLength);
+      Readbuffer result = Readbuffer(bufferData, position);
+      session.complete();
+      return result;
+    } finally {
+      _releaseResource(resourceAt);
+    }
   }
 
   @override
   Future<int> length() async {
     if (_length != null) return _length!;
     _ReadbufferFileResource resourceAt = _resourceAts.isNotEmpty ? _resourceAts.removeFirst() : _ReadbufferFileResource(filename);
-    _length = await resourceAt.length();
-    _resourceAts.addLast(resourceAt);
+    try {
+      _length = await resourceAt.length();
+    } finally {
+      _releaseResource(resourceAt);
+    }
     assert(_length! >= 0);
     //_log.info("length needed ${DateTime.now().millisecondsSinceEpoch - time} ms");
     return _length!;
+  }
+
+  /// Returns [resourceAt] to the pool, or closes it if the pool is full.
+  void _releaseResource(_ReadbufferFileResource resourceAt) {
+    if (_resourceAts.length >= _maxPooledResources) {
+      unawaited(resourceAt.close());
+    } else {
+      _resourceAts.addLast(resourceAt);
+    }
   }
 
   @override

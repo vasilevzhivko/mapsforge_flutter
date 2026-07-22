@@ -50,6 +50,9 @@ class Readbuffer {
   /// The current offset in the underlying file which denotes the start of the [_bufferData] or [null] if unknown
   int get offset => _offset;
 
+  /// Size of the underlying data chunk in bytes, for cache weight accounting.
+  int get bufferSize => _bufferData.length;
+
   /// Extracts a portion of the buffer as a new Uint8List.
   ///
   /// [position] Starting position in the buffer

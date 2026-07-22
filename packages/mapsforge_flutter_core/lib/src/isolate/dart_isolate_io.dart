@@ -83,11 +83,22 @@ class FlutterIsolateInstance {
 
   /// Starts a single computation in an isolate. This method runs in the main isolate.
   Future<V> compute<U, V>(U request) {
-    assert(_sendPort != null, "wait until start() is done or isolate is already disposed");
+    // The isolate may not be started yet, or may already be disposed (e.g. the
+    // map model was released while in-flight tile/label render jobs are still
+    // calling compute()). In release builds the assert is stripped, so a bare
+    // `_sendPort!` would throw "Null check operator used on a null value" and
+    // crash the whole render pipeline. Fail this one computation gracefully
+    // instead — callers treat the error as "skip this tile/label".
+    final SendPort? sendPort = _sendPort;
+    if (sendPort == null) {
+      return Future<V>.error(
+        StateError('Isolate unavailable (not started yet or already disposed)'),
+      );
+    }
     _FlutterProcess<V> flutterProcess = _FlutterProcess();
     _flutterProcesses[flutterProcess._id] = flutterProcess;
     _IsolateRequestInstanceParams params = _IsolateRequestInstanceParams<U>(flutterProcess._id, request);
-    _sendPort!.send(params);
+    sendPort.send(params);
     return flutterProcess._completer.future;
   }
 

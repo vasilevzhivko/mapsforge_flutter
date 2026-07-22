@@ -19,6 +19,17 @@ abstract class Datastore {
   /// Should be called when the datastore is no longer needed.
   void dispose();
 
+  /// True if this datastore already delegates its reads to its own isolate
+  /// (e.g. an isolate-backed mapfile). Renderers must NOT wrap such a
+  /// datastore in another reader isolate.
+  bool get delegatesToIsolate => false;
+
+  /// Releases transient native resources (open file handles, cached buffers)
+  /// so this object can be safely deep-copied into a freshly spawned isolate.
+  /// Called by an isolate reader right before spawning; the datastore remains
+  /// usable afterwards (resources are reopened on demand).
+  Future<void> prepareForIsolateSend() async {}
+
   /// Reads label data for a single tile.
   ///
   /// Labels include POIs and named ways (roads, buildings, etc.) that have
