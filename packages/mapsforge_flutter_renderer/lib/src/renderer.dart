@@ -66,4 +66,25 @@ abstract class Renderer {
   /// true so missing/failed tiles simply show nothing and the layer below shows
   /// through. Defaults to false.
   bool get transparentOnMiss => false;
+
+  /// This renderer's share (0..1) of the global rendered-tile byte budget
+  /// ([MapsforgeSettingsMgr.tileBitmapBudgetBytes]). Every renderer layer has
+  /// its OWN tile cache of full-tile rasterized images, so the budget is split
+  /// between layers instead of multiplying: the base map takes the lion's
+  /// share; a lightweight OVERLAY (e.g. hillshade) should override this with a
+  /// small share. Defaults to 0.75.
+  double get tileCacheShare => 0.75;
+
+  /// The map background color (ARGB) to paint underneath this renderer's
+  /// tiles, or null for no fill. For a base map this makes not-yet-rendered
+  /// areas (e.g. right after a multi-level zoom jump) read as empty land in
+  /// the theme's color instead of holes showing the app background.
+  int? get backgroundColor => null;
+
+  /// Whether the tile queue should speculatively render zoom±1 tiles into this
+  /// renderer's cache after the current zoom is filled. Great for a base map
+  /// (instant zoom), but a lightweight overlay with a small cache should opt out
+  /// — the off-zoom tiles would evict the visible ones and cause flicker while
+  /// panning. Defaults true.
+  bool get prefetchAdjacentZooms => true;
 }

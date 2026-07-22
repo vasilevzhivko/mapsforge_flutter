@@ -41,6 +41,16 @@ class MultimapDatastore extends Datastore {
     }
   }
 
+  @override
+  bool get delegatesToIsolate => datastores.any((datastore) => datastore.delegatesToIsolate);
+
+  @override
+  Future<void> prepareForIsolateSend() async {
+    for (Datastore datastore in datastores) {
+      await datastore.prepareForIsolateSend();
+    }
+  }
+
   /// adds another mapDataStore
   ///
   /// @param mapDataStore      the mapDataStore to add

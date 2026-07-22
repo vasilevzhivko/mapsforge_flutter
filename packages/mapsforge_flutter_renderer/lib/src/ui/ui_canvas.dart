@@ -138,7 +138,11 @@ class UiCanvas {
       }
       _uiCanvas.restore();
     } else {
-      ui.Image image = picture.getImage()!; //await picture.convertPictureToImage()!;
+      // Borrowed reference — owned and disposed by the tile cache/job queue.
+      // The engine's display list retains the pixels for the frame, so not
+      // holding our own clone here is safe.
+      ui.Image image = picture.getImage()!;
+      assert(!image.debugDisposed, "Image is already disposed");
       // paint.color alpha multiplies the image opacity in drawImage.
       _uiCanvas.drawImage(image, ui.Offset(left, top), ui.Paint()..color = ui.Color.fromRGBO(0, 0, 0, a));
     }

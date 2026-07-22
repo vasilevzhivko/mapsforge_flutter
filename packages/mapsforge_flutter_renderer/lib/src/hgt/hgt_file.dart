@@ -59,17 +59,20 @@ class HgtFile {
     }
 
     final Uint8List bytes = file.readAsBytesSync();
-    if (bytes.lengthInBytes % 2 != 0) {
-      throw StateError('Invalid .hgt length: ${bytes.lengthInBytes}');
+    final int columns = bytes.lengthInBytes ~/ 2 ~/ rows;
+    if (bytes.lengthInBytes % 2 != 0 || columns < 2) {
+      // A truncated/corrupt file (e.g. interrupted download) must behave like
+      // a missing one — a throw here escalated to an unhandled error in the
+      // shade isolate and left tile futures hanging.
+      _log.warning('Corrupt/truncated HGT file (${bytes.lengthInBytes} bytes): ${file.path}');
+      return HgtFile._noFile(baseLat: baseLat, baseLon: baseLon, lonWidth: tileWidth, latHeight: tileHeight);
     }
-
-    int columns = bytes.lengthInBytes ~/ 2 ~/ rows;
 
     // HGT stores signed 16-bit big-endian.
     final ByteData bd = ByteData.sublistView(bytes);
     final elevations = Int16List(rows * columns);
     for (int i = 0; i < rows * columns; i++) {
-      elevations[i] = bd.getInt16(i * 2, Endian.little);
+      elevations[i] = bd.getInt16(i * 2, Endian.big);
     }
 
     return HgtFile._(baseLat: baseLat, baseLon: baseLon, lonWidth: tileWidth, latHeight: tileHeight, rows: rows, columns: columns, elevations: elevations);
@@ -179,6 +182,162 @@ class HgtFile {
     final q00 = elevation(x.round(), y.round());
     return q00;
   }
+
+  /// Bilinearly interpolated elevation (meters), or null if outside coverage.
+  ///
+  /// Unlike [elevationAt] (nearest-neighbour), this returns a smooth value
+  /// between the four surrounding SRTM samples. Nearest-neighbour produces a
+  /// staircase when a GPS track is sampled more densely than the ~90m DEM grid,
+  /// and the steps at cell boundaries inflate accumulated ascent/descent. Use
+  /// this method when measuring elevation gain along a recorded track.
+  double? elevationBilinear(double latitude, double longitude) {
+    if (rows == 0) return null;
+    if (latitude < baseLat ||
+        latitude > baseLat + latHeight ||
+        longitude < baseLon ||
+        longitude > baseLon + lonWidth) {
+      return null;
+    }
+
+    final double u = (longitude - baseLon) / lonWidth;
+    final double v = ((baseLat + latHeight) - latitude) / latHeight;
+    final double x = u * (columns - 1);
+    final double y = v * (rows - 1);
+
+    // Manual clamping: `num.clamp` showed up hot in CPU profiles of the
+    // hillshade sampling loop.
+    final int maxC = columns - 1, maxR = rows - 1;
+    int x0 = x.floor();
+    if (x0 < 0) {
+      x0 = 0;
+    } else if (x0 > maxC) {
+      x0 = maxC;
+    }
+    int y0 = y.floor();
+    if (y0 < 0) {
+      y0 = 0;
+    } else if (y0 > maxR) {
+      y0 = maxR;
+    }
+    final int x1 = x0 + 1 > maxC ? maxC : x0 + 1;
+    final int y1 = y0 + 1 > maxR ? maxR : y0 + 1;
+    final double fx = x - x0;
+    final double fy = y - y0;
+
+    final int e00 = elevation(x0, y0);
+    final int e10 = elevation(x1, y0);
+    final int e01 = elevation(x0, y1);
+    final int e11 = elevation(x1, y1);
+
+    // If any corner is a void/ocean sentinel, fall back to nearest valid sample.
+    bool bad(int e) => e == invalid || e == ocean;
+    if (bad(e00) || bad(e10) || bad(e01) || bad(e11)) {
+      int xr = x.round();
+      if (xr > maxC) xr = maxC;
+      int yr = y.round();
+      if (yr > maxR) yr = maxR;
+      final nn = elevation(xr, yr);
+      return bad(nn) ? null : nn.toDouble();
+    }
+
+    final double top = e00 * (1 - fx) + e10 * fx;
+    final double bot = e01 * (1 - fx) + e11 * fx;
+    return top * (1 - fy) + bot * fy;
+  }
+
+  /// Bicubic (Catmull-Rom) interpolated elevation in meters, or null outside
+  /// coverage. Unlike [elevationBilinear] — whose GRADIENT is discontinuous at
+  /// cell borders, which makes hillshading show every ~90 m cell as a
+  /// flat-shaded square when sampled finer than the grid — the bicubic surface
+  /// has a continuous first derivative, so shading derived from it stays
+  /// smooth at any zoom. Falls back to bilinear near voids/ocean sentinels.
+  double? elevationBicubic(double latitude, double longitude) {
+    if (rows == 0) return null;
+    if (latitude < baseLat ||
+        latitude > baseLat + latHeight ||
+        longitude < baseLon ||
+        longitude > baseLon + lonWidth) {
+      return null;
+    }
+
+    final double u = (longitude - baseLon) / lonWidth;
+    final double v = ((baseLat + latHeight) - latitude) / latHeight;
+    final double x = u * (columns - 1);
+    final double y = v * (rows - 1);
+    final int maxC = columns - 1, maxR = rows - 1;
+    int x1 = x.floor();
+    if (x1 < 0) {
+      x1 = 0;
+    } else if (x1 > maxC) {
+      x1 = maxC;
+    }
+    int y1 = y.floor();
+    if (y1 < 0) {
+      y1 = 0;
+    } else if (y1 > maxR) {
+      y1 = maxR;
+    }
+    final double fx = x - x1;
+    final double fy = y - y1;
+
+    // Clamped 4×4 neighbourhood indices, computed ONCE. The previous version
+    // clamped per lookup and read every sample twice (void pre-scan + fit) —
+    // 64 clamps and 32 array reads per call, which dominated CPU profiles of
+    // the hillshade loop. Now: 16 reads, sentinel check inlined in the same
+    // pass.
+    final int c0 = x1 - 1 < 0 ? 0 : x1 - 1;
+    final int c1 = x1;
+    final int c2 = x1 + 1 > maxC ? maxC : x1 + 1;
+    final int c3 = x1 + 2 > maxC ? maxC : x1 + 2;
+    final int r0i = y1 - 1 < 0 ? 0 : y1 - 1;
+    final int r1i = y1;
+    final int r2i = y1 + 1 > maxR ? maxR : y1 + 1;
+    final int r3i = y1 + 2 > maxR ? maxR : y1 + 2;
+
+    final Int16List elevations = _elevations;
+    final int b0 = r0i * columns, b1 = r1i * columns, b2 = r2i * columns, b3 = r3i * columns;
+
+    final p = _bicubicScratch;
+    p[0] = elevations[b0 + c0];
+    p[1] = elevations[b0 + c1];
+    p[2] = elevations[b0 + c2];
+    p[3] = elevations[b0 + c3];
+    p[4] = elevations[b1 + c0];
+    p[5] = elevations[b1 + c1];
+    p[6] = elevations[b1 + c2];
+    p[7] = elevations[b1 + c3];
+    p[8] = elevations[b2 + c0];
+    p[9] = elevations[b2 + c1];
+    p[10] = elevations[b2 + c2];
+    p[11] = elevations[b2 + c3];
+    p[12] = elevations[b3 + c0];
+    p[13] = elevations[b3 + c1];
+    p[14] = elevations[b3 + c2];
+    p[15] = elevations[b3 + c3];
+
+    // A void anywhere in the 4×4 neighbourhood would drag the sentinel value
+    // into the fit; defer to bilinear (it has its own void handling).
+    for (var i = 0; i < 16; i++) {
+      final int e = p[i];
+      if (e == invalid || e == ocean) {
+        return elevationBilinear(latitude, longitude);
+      }
+    }
+
+    final r0 = _cat(p[0].toDouble(), p[1].toDouble(), p[2].toDouble(), p[3].toDouble(), fx);
+    final r1 = _cat(p[4].toDouble(), p[5].toDouble(), p[6].toDouble(), p[7].toDouble(), fx);
+    final r2 = _cat(p[8].toDouble(), p[9].toDouble(), p[10].toDouble(), p[11].toDouble(), fx);
+    final r3 = _cat(p[12].toDouble(), p[13].toDouble(), p[14].toDouble(), p[15].toDouble(), fx);
+    return _cat(r0, r1, r2, r3, fy);
+  }
+
+  /// Scratch buffer for [elevationBicubic] — safe because all callers run
+  /// synchronously on one isolate; avoids a 16-element allocation per sample.
+  static final Int16List _bicubicScratch = Int16List(16);
+
+  /// Catmull-Rom interpolation at parameter [t].
+  static double _cat(double p0, double p1, double p2, double p3, double t) =>
+      p1 + 0.5 * t * (p2 - p0 + t * (2 * p0 - 5 * p1 + 4 * p2 - p3 + t * (3 * (p1 - p2) + p3 - p0)));
 
   int elevation(int col, int row) {
     return _elevations[row * columns + col];

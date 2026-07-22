@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
 import 'package:logging/logging.dart';
 import 'package:mapsforge_flutter_core/dart_isolate.dart';
@@ -79,6 +81,17 @@ class IsolateDatastoreRenderer implements Renderer {
 
   @override
   bool get transparentOnMiss => false;
+
+  // This class `implements` Renderer (not extends), so interface defaults are
+  // not inherited — mirror the base-map cache share + zoom prefetch.
+  @override
+  double get tileCacheShare => 0.75;
+
+  @override
+  bool get prefetchAdjacentZooms => true;
+
+  @override
+  int? get backgroundColor => null;
 }
 
 //////////////////////////////////////////////////////////////////////////////
@@ -145,6 +158,15 @@ class DatastoreRenderer extends Renderer {
   /// Reader for extracting map data from the datastore.
   DatastoreReader? _datastoreReader;
 
+  /// Resolves to the reader once it is ready; the isolate variant is
+  /// pre-spawned in the constructor so its ~600ms startup overlaps app
+  /// startup instead of delaying the first tile.
+  late final Future<DatastoreReader> _datastoreReaderFuture;
+
+  /// Whether this renderer holds a reference on the shared reader isolate
+  /// (released in [dispose]).
+  bool _usesSharedIsolateReader = false;
+
   /// Object pool for RenderInfo sets to reduce garbage collection.
   static final ObjectPool<Set<RenderInfo>> _renderInfoSetPool = ObjectPool<Set<RenderInfo>>(
     factory: () => <RenderInfo>{},
@@ -157,15 +179,31 @@ class DatastoreRenderer extends Renderer {
   /// [datastore] Data source providing map features
   /// [rendertheme] Theme defining visual styling rules
   /// [useSeparateLabelLayer] Whether to render labels at a separate layer (true) or onto the tiles directly (false
-  /// [useIsolateReader] Whether to use an isolate for rendering. If you use [IsolateMapfile] do NOT use an isolateReader
+  /// [useIsolateReader] Whether to read + theme-match in a shared background
+  /// isolate. Default FALSE: the reply is the fully matched render data, and
+  /// deep-copying that graph onto the UI thread per tile stalls badly on
+  /// dense/low-zoom tiles — usually worse than doing the matching in place.
+  /// Prefer an [IsolateMapfile] datastore (compact raw-bundle replies) to get
+  /// file decoding off the UI thread. When enabled, the reader isolate is
+  /// shared per datastore and pre-spawned here; automatically disabled for
+  /// datastores that already run in their own isolate — never stack isolate
+  /// on isolate.
   DatastoreRenderer(this.datastore, this.rendertheme, {this.useSeparateLabelLayer = true, bool useIsolateReader = false}) {
     if (useSeparateLabelLayer) {
       tileDependencies = null;
     } else {
       tileDependencies = TileDependencies();
     }
-    if (!useIsolateReader) {
-      _datastoreReader = DatastoreReaderImpl(datastore);
+    if (useIsolateReader && !datastore.delegatesToIsolate) {
+      _usesSharedIsolateReader = true;
+      _datastoreReaderFuture = IsolateDatastoreReader.shared(datastore).then<DatastoreReader>((reader) => reader).catchError((Object error) {
+        // No isolate support (web) or spawn failure — fall back to reading on
+        // the main isolate rather than failing every tile.
+        _log.warning("Isolate reader unavailable ($error), falling back to in-process reader");
+        return DatastoreReaderImpl(datastore) as DatastoreReader;
+      });
+    } else {
+      _datastoreReaderFuture = Future.value(DatastoreReaderImpl(datastore));
     }
   }
 
@@ -174,6 +212,9 @@ class DatastoreRenderer extends Renderer {
   void dispose() {
     tileDependencies?.dispose();
     rendertheme.dispose();
+    if (_usesSharedIsolateReader) {
+      unawaited(IsolateDatastoreReader.release(datastore));
+    }
     datastore.dispose();
     super.dispose();
   }
@@ -185,12 +226,10 @@ class DatastoreRenderer extends Renderer {
   @override
   Future<JobResult> executeJob(JobRequest job) async {
     var session = PerformanceProfiler().startSession(category: "DatastoreRenderer.executeJob");
-    // current performance measurements for isolates indicates that isolates are too slow so it makes no sense to use them currently. Seems
-    // we need something like 600ms to start an isolate whereas the whole read-process just needs about 200ms
     RenderthemeZoomlevel renderthemeLevel = rendertheme.prepareZoomlevel(job.tile.zoomLevel);
     session.checkpoint("after prepareZoomlevel");
 
-    _datastoreReader ??= await IsolateDatastoreReader.create(datastore);
+    _datastoreReader ??= await _datastoreReaderFuture;
 
     LayerContainerCollection? layerContainerCollection = await _datastoreReader!.read(job.tile, renderthemeLevel);
 
@@ -236,11 +275,9 @@ class DatastoreRenderer extends Renderer {
   @override
   Future<JobResult> retrieveLabels(JobRequest job) async {
     var session = PerformanceProfiler().startSession(category: "DatastoreRenderer.retrieveLabels");
-    // current performance measurements for isolates indicates that isolates are too slow so it makes no sense to use them currently. Seems
-    // we need something like 600ms to start an isolate whereas the whole read-process just needs about 200ms
     RenderthemeZoomlevel renderthemeLevel = rendertheme.prepareZoomlevel(job.tile.zoomLevel);
 
-    _datastoreReader ??= await IsolateDatastoreReader.create(datastore);
+    _datastoreReader ??= await _datastoreReaderFuture;
 
     LayerContainerCollection? layerContainerCollection = await _datastoreReader!.readLabels(job.tile, job.rightLower ?? job.tile, renderthemeLevel);
 
@@ -288,4 +325,7 @@ class DatastoreRenderer extends Renderer {
   String getRenderKey() {
     return "${rendertheme.hashCode ^ useSeparateLabelLayer.hashCode}";
   }
+
+  @override
+  int? get backgroundColor => rendertheme.getMapBackground();
 }

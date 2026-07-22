@@ -5,19 +5,17 @@ import 'package:mapsforge_flutter_core/utils.dart';
 import 'package:mapsforge_flutter_renderer/src/ui/tile_picture.dart';
 
 /// A helper class for creating placeholder and error tile bitmaps.
+///
+/// Every method returns a freshly recorded [TilePicture] owned by the caller —
+/// recording these few draw commands is cheap, and caller ownership keeps the
+/// dispose contract simple (no shared instances that a cache could dispose).
 class ImageHelper {
   static final double _margin = 5;
-
-  /// todo since the images may be disposed by the receiving cache there may be a problem here. We should rather handle a clone() to the caller.
-  static TilePicture? _missing;
-
-  static TilePicture? _noData;
 
   /// Creates a tile bitmap to indicate that the tile is currently being rendered.
   ///
   /// This is used as a placeholder until the actual tile data is available.
   Future<TilePicture> createMissingBitmap() async {
-    if (_missing != null) return _missing!.clone();
     double tileSize = MapsforgeSettingsMgr().tileSize;
     var pictureRecorder = ui.PictureRecorder();
     var canvas = ui.Canvas(pictureRecorder);
@@ -37,13 +35,11 @@ class ImageHelper {
     canvas.drawParagraph(builder.build()..layout(ui.ParagraphConstraints(width: tileSize.toDouble())), ui.Offset(0, tileSize / 2));
 
     var pic = pictureRecorder.endRecording();
-    _missing = TilePicture.fromPicture(pic);
-    return _missing!;
+    return TilePicture.fromPicture(pic);
   }
 
   /// Creates a tile bitmap to indicate that no map data is available for this tile.
   Future<TilePicture> createNoDataBitmap() async {
-    if (_noData != null) return _noData!.clone();
     double tileSize = MapsforgeSettingsMgr().tileSize;
     var pictureRecorder = ui.PictureRecorder();
     var canvas = ui.Canvas(pictureRecorder);
@@ -63,24 +59,18 @@ class ImageHelper {
     canvas.drawParagraph(builder.build()..layout(ui.ParagraphConstraints(width: tileSize.toDouble())), ui.Offset(0, tileSize / 2));
 
     var pic = pictureRecorder.endRecording();
-    //    ui.Image img = await pic.toImage(tileSize.toInt(), tileSize.toInt());
-    _noData = TilePicture.fromPicture(pic);
-    return _noData!.clone();
+    return TilePicture.fromPicture(pic);
   }
-
-  static TilePicture? _transparent;
 
   /// Creates a fully transparent tile — used as the "no data" fallback for
   /// transparent OVERLAY renderers so a missing/failed overlay tile shows the
   /// layer below instead of an opaque placeholder grid.
   Future<TilePicture> createTransparentBitmap() async {
-    if (_transparent != null) return _transparent!.clone();
     // An empty recorded picture paints nothing → fully transparent tile.
     var pictureRecorder = ui.PictureRecorder();
     ui.Canvas(pictureRecorder);
     var pic = pictureRecorder.endRecording();
-    _transparent = TilePicture.fromPicture(pic);
-    return _transparent!.clone();
+    return TilePicture.fromPicture(pic);
   }
 
   /// Creates a tile bitmap to display an error message.

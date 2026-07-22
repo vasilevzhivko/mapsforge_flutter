@@ -14,16 +14,52 @@ import 'package:mapsforge_flutter_rendertheme/rendertheme.dart';
 class IsolateDatastoreReader implements DatastoreReader {
   static DatastoreReaderImpl? _reader;
 
+  /// One shared reader isolate per datastore (identity-keyed): several
+  /// renderer layers over the same datastore share a single isolate — and
+  /// thus a single in-isolate Mapfile with its block/index caches — instead
+  /// of duplicating all of it per layer.
+  static final Map<Datastore, Future<IsolateDatastoreReader>> _shared = Map.identity();
+
+  static final Map<Datastore, int> _refCounts = Map.identity();
+
   /// a long-running instance of an isolate
   late final FlutterIsolateInstance _isolateInstance = FlutterIsolateInstance();
 
-  IsolateDatastoreReader._(Datastore datastore);
+  IsolateDatastoreReader._();
 
   /// Creates and spawns a new `IsolateDatastoreReader`.
   static Future<IsolateDatastoreReader> create(Datastore datastore) async {
-    IsolateDatastoreReader instance = IsolateDatastoreReader._(datastore);
+    IsolateDatastoreReader instance = IsolateDatastoreReader._();
+    // The datastore is deep-copied into the isolate; open file handles cannot
+    // cross the boundary.
+    await datastore.prepareForIsolateSend();
     await instance._isolateInstance.spawn(_createInstanceStatic, DatastoreReaderIsolateInitRequest(datastore));
     return instance;
+  }
+
+  /// Returns the shared reader isolate for [datastore], spawning it on first
+  /// use. Every call must be balanced by a [release] call.
+  static Future<IsolateDatastoreReader> shared(Datastore datastore) {
+    _refCounts[datastore] = (_refCounts[datastore] ?? 0) + 1;
+    return _shared.putIfAbsent(datastore, () => create(datastore));
+  }
+
+  /// Releases one [shared] reference; the isolate is disposed when the last
+  /// user releases it. Never throws (a failed spawn is silently discarded).
+  static Future<void> release(Datastore datastore) async {
+    final int refs = (_refCounts[datastore] ?? 0) - 1;
+    if (refs > 0) {
+      _refCounts[datastore] = refs;
+      return;
+    }
+    _refCounts.remove(datastore);
+    final Future<IsolateDatastoreReader>? future = _shared.remove(datastore);
+    if (future == null) return;
+    try {
+      (await future)._isolateInstance.dispose();
+    } catch (_) {
+      // spawn had failed; nothing to dispose
+    }
   }
 
   @pragma('vm:entry-point')

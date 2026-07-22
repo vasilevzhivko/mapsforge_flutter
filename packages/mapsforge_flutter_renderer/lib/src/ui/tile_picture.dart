@@ -5,23 +5,20 @@ import 'package:mapsforge_flutter_core/utils.dart';
 /// A container for either a `ui.Picture` (a recorded sequence of drawing
 /// commands) or a `ui.Image` (raw pixel data).
 ///
-/// This class is used to represent a rendered map tile. It can be created from
-/// either a picture or a bitmap, and it handles the disposal of the underlying
-/// graphics resources. It is crucial to call [dispose] when the tile is no
-/// longer needed.
+/// This class is used to represent a rendered map tile.
+///
+/// Ownership contract: a TilePicture exclusively owns its underlying
+/// `ui.Picture`/`ui.Image`. Accessors return borrowed references that must not
+/// be disposed by the caller and must not be held across an await. Exactly one
+/// owner calls [dispose] — for tiles this is the tile cache (via onEvict) or
+/// the TileJobQueue's zombie sweep.
 class TilePicture {
-  final ui.Picture? _picture;
-
-  late final bool _pictureCloned;
+  ui.Picture? _picture;
 
   ui.Image? _image;
 
-  TilePicture._(this._picture, this._image) {
-    _pictureCloned = _picture != null;
-  }
-
   /// Creates a [TilePicture] from a `ui.Picture`.
-  TilePicture.fromPicture(this._picture) : _image = null, _pictureCloned = false;
+  TilePicture.fromPicture(this._picture) : _image = null;
 
   /// Creates a [TilePicture] from a `ui.Image`.
   ///
@@ -29,39 +26,47 @@ class TilePicture {
   TilePicture.fromBitmap(this._image)
     : assert(_image != null, "Image must not be null"),
       assert(!_image!.debugDisposed, "Image is already disposed"),
-      _picture = null,
-      _pictureCloned = false;
+      _picture = null;
 
-  /// Creates a clone of this [TilePicture].
-  ///
-  /// The underlying `ui.Image` is also cloned if it exists.
-  TilePicture clone() {
-    return TilePicture._(_picture, _image?.clone());
-  }
-
-  /// Returns the underlying `ui.Picture`, if it exists.
+  /// Returns the underlying `ui.Picture`, if it exists. Borrowed reference —
+  /// do not dispose.
   ui.Picture? getPicture() {
     return _picture;
   }
 
-  /// Returns the underlying `ui.Image`, if it exists.
+  /// Rasterized image dimensions (0 if this still holds only a Picture), for
+  /// memory accounting.
+  int get imageWidth => _image?.width ?? 0;
+  int get imageHeight => _image?.height ?? 0;
+
+  /// Returns the underlying `ui.Image`, if it exists. Borrowed reference —
+  /// do not dispose, do not hold across an await.
   ui.Image? getImage() {
     if (_image != null) assert(!_image!.debugDisposed, "Image is already disposed");
-    return _image?.clone();
+    return _image;
   }
 
-  /// Converts the underlying `ui.Picture` to a `ui.Image`.
-  ///
-  /// If this [TilePicture] already contains an image, that image is returned directly.
-  ui.Image convertPictureToImage() {
-    if (_image != null) return _image!;
+  /// Rasterizes the underlying `ui.Picture` into a `ui.Image` owned by this
+  /// TilePicture and releases the picture (drawing images each frame is faster
+  /// than re-rendering pictures). No-op if already rasterized.
+  void rasterize() {
+    if (_image != null) return;
     _image = _picture!.toImageSync(MapsforgeSettingsMgr().tileSize.round(), MapsforgeSettingsMgr().tileSize.round());
-    return _image!.clone();
+    _picture!.dispose();
+    _picture = null;
+  }
+
+  /// Rasterizes if needed and returns the image. Borrowed reference — do not
+  /// dispose, this TilePicture still owns it. Kept for tests and tools;
+  /// production code should call [rasterize] and draw via [getImage].
+  ui.Image convertPictureToImage() {
+    rasterize();
+    return _image!;
   }
 
   /// Disposes the underlying `ui.Picture` and/or `ui.Image` to release their resources.
   void dispose() {
-    if (!_pictureCloned) _picture?.dispose();
+    _picture?.dispose();
     _image?.dispose();
   }
 }
