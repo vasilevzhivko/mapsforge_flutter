@@ -1,8 +1,8 @@
 import 'dart:typed_data';
 
-import 'package:ecache/ecache.dart';
 import 'package:logging/logging.dart';
 import 'package:mapsforge_flutter_core/buffer.dart';
+import 'package:mapsforge_flutter_core/cache.dart';
 import 'package:mapsforge_flutter_core/dart_isolate.dart';
 import 'package:mapsforge_flutter_core/model.dart';
 import 'package:mapsforge_flutter_core/projection.dart';
@@ -52,6 +52,14 @@ class IsolateMapfile implements Datastore {
     _isolateInstance.dispose();
   }
 
+  @override
+  bool get delegatesToIsolate => true;
+
+  @override
+  Future<void> prepareForIsolateSend() async {
+    throw UnsupportedError("IsolateMapfile already runs in its own isolate and must not be sent to another one");
+  }
+
   @pragma('vm:entry-point')
   static Future<void> _createInstanceStatic(IsolateInitInstanceParams request) async {
     filename = (request.initObject as _MapfileInstanceRequest).filename;
@@ -71,14 +79,22 @@ class IsolateMapfile implements Datastore {
 
   @override
   Future<DatastoreBundle?> readLabels(Tile upperLeft, Tile lowerRight) async {
-    DatastoreBundle? result = await _isolateInstance.compute(_MapfileReadRequest(upperLeft, lowerRight));
-    return result;
+    try {
+      return await _isolateInstance.compute(_MapfileReadRequest(upperLeft, lowerRight));
+    } catch (_) {
+      // Render isolate not ready / disposed mid-render — skip this label batch
+      // instead of crashing. It will be re-requested on the next render pass.
+      return null;
+    }
   }
 
   @override
   Future<DatastoreBundle?> readLabelsSingle(Tile tile) async {
-    DatastoreBundle? result = await _isolateInstance.compute(_MapfileReadSingleRequest(tile));
-    return result;
+    try {
+      return await _isolateInstance.compute(_MapfileReadSingleRequest(tile));
+    } catch (_) {
+      return null;
+    }
   }
 
   @override
@@ -89,8 +105,11 @@ class IsolateMapfile implements Datastore {
 
   @override
   Future<DatastoreBundle?> readMapDataSingle(Tile tile) async {
-    DatastoreBundle? result = await _isolateInstance.compute(_MapfileReadDataSingleRequest(tile));
-    return result;
+    try {
+      return await _isolateInstance.compute(_MapfileReadDataSingleRequest(tile));
+    } catch (_) {
+      return null;
+    }
   }
 
   @override
@@ -107,8 +126,13 @@ class IsolateMapfile implements Datastore {
 
   @override
   Future<bool> supportsTile(Tile tile) async {
-    bool result = await _isolateInstance.compute(_MapfileSupportsTileRequest(tile));
-    return result;
+    try {
+      return await _isolateInstance.compute(_MapfileSupportsTileRequest(tile));
+    } catch (_) {
+      // Isolate not ready / disposed — treat as "no data for this tile" rather
+      // than crashing the tile renderer.
+      return false;
+    }
   }
 
   @override
@@ -231,7 +255,14 @@ class Mapfile extends MapDatastore {
 
   late final ReadbufferSource readBufferSource;
 
-  final Cache<String, Readbuffer> _cache = LfuCache(capacity: 100);
+  /// Cache for raw tile-data blocks read from the file. Byte-bounded (see
+  /// [MapsforgeSettingsMgr.blockCacheBytes]) — blocks can be up to
+  /// [MapfileHelper.MAXIMUM_BUFFER_SIZE] (8MB) each, so an entry-count bound
+  /// would allow a practically unbounded heap on dense maps.
+  final WeightedLruCache<String, Readbuffer> _cache = WeightedLruCache(
+    maxWeightBytes: MapsforgeSettingsMgr().blockCacheBytes,
+    weigher: (Readbuffer buffer) => buffer.bufferSize,
+  );
 
   /// Creates a `Mapfile` instance from a file path.
   ///
@@ -292,6 +323,15 @@ class Mapfile extends MapDatastore {
     readBufferSource.dispose();
     _cache.dispose();
     _queue.dispose();
+  }
+
+  @override
+  Future<void> prepareForIsolateSend() async {
+    // Open RandomAccessFile handles cannot cross an isolate boundary, and the
+    // block cache would just be dead weight in the copy — the isolate rebuilds
+    // both on demand.
+    await readBufferSource.freeRessources();
+    _cache.clear();
   }
 
   /// Returns the low-level header and sub-file information for this map file.
