@@ -105,6 +105,12 @@ class MapModel extends ChangeNotifier {
   }
 
   void setPosition(MapPosition position) {
+    // Never accept a zoom outside the configured range: an out-of-range
+    // START position used to display fine and then snap to the bound on the
+    // first zoom gesture — confusing and unrecoverable from the UI.
+    if (!zoomlevelRange.isWithin(position.zoomlevel)) {
+      position = position.zoomTo(zoomlevelRange.ensureBounds(position.zoomlevel));
+    }
     position = _clampScaleToZoomRange(position);
     position = _clampCenterToBounds(position);
     _lastPosition = position;
