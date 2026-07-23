@@ -1,6 +1,5 @@
 import 'dart:math';
 
-import 'package:collection/collection.dart';
 import 'package:mapsforge_flutter_core/model.dart';
 import 'package:mapsforge_flutter_core/projection.dart';
 import 'package:mapsforge_flutter_core/utils.dart';
@@ -29,7 +28,11 @@ class WayProperties implements NodeWayProperties {
   /// cache for the boundary of the way in absolute mappixels
   MapRectangle? _boundaryAbsolute;
 
-  WayProperties(this.way, PixelProjection projection) : layer = max(0, way.layer), isClosedWay = LatLongUtils.isClosedWay(way.latLongs[0]) {
+  /// [isClosedWay] can be passed in when the caller has already computed it
+  /// (the datastore reader does, for rule matching) to avoid recomputation.
+  WayProperties(this.way, PixelProjection projection, {bool? isClosedWay})
+    : layer = max(0, way.layer),
+      isClosedWay = isClosedWay ?? LatLongUtils.isClosedWay(way.latLongs[0]) {
     _calculateCoordinatesAbsolute(projection);
   }
 
@@ -39,16 +42,38 @@ class WayProperties implements NodeWayProperties {
 
   List<List<Mappoint>> _calculateCoordinatesAbsolute(PixelProjection projection) {
     coordinatesAbsolute = [];
-    way.latLongs.forEachIndexed((int idx, List<ILatLong> outerList) {
-      List<Mappoint> mp1 = outerList.map((ILatLong position) => projection.latLonToPixel(position)).toList();
-      MapRectangle minMaxMappoint = MapRectangle.from(mp1);
+    final List<List<ILatLong>> rings = way.latLongs;
+    for (int idx = 0; idx < rings.length; idx++) {
+      final List<ILatLong> ring = rings[idx];
+      final int length = ring.length;
+      if (length == 0) {
+        if (idx == 0) _boundaryAbsolute = const MapRectangle.zero();
+        continue;
+      }
+      // Single pass: project each point and fold the bbox in the same loop.
+      // The previous closure-based map().toList() + MapRectangle.from()
+      // iterated everything twice and was a top CPU cost of tile production.
+      List<Mappoint> mp1 = List<Mappoint>.filled(length, const Mappoint(0, 0), growable: false);
+      double minX = double.maxFinite, minY = double.maxFinite;
+      double maxX = -1, maxY = -1;
+      for (int i = 0; i < length; i++) {
+        final ILatLong position = ring[i];
+        final double x = projection.longitudeToPixelX(position.longitude);
+        final double y = projection.latitudeToPixelY(position.latitude);
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        mp1[i] = Mappoint(x, y);
+      }
+      final MapRectangle minMaxMappoint = MapRectangle(minX, minY, maxX, maxY);
       if (idx == 0) _boundaryAbsolute = minMaxMappoint;
       if (minMaxMappoint.getWidth() > maxGap || minMaxMappoint.getHeight() > maxGap) {
         if (mp1.length > 6) mp1 = DouglasPeuckerMappoint().simplify(mp1, maxGap);
         // check if the area to draw is too small. This saves 100ms for complex structures
         coordinatesAbsolute.add(mp1);
       }
-    });
+    }
     return coordinatesAbsolute;
   }
 

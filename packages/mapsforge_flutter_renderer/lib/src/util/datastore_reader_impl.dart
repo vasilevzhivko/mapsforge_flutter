@@ -1,6 +1,7 @@
 import 'package:mapsforge_flutter_core/dart_isolate.dart';
 import 'package:mapsforge_flutter_core/model.dart';
 import 'package:mapsforge_flutter_core/projection.dart';
+import 'package:mapsforge_flutter_core/utils.dart';
 import 'package:mapsforge_flutter_renderer/src/datastore_reader.dart';
 import 'package:mapsforge_flutter_rendertheme/model.dart';
 import 'package:mapsforge_flutter_rendertheme/rendertheme.dart';
@@ -173,37 +174,52 @@ class DatastoreReaderImpl implements DatastoreReader {
     // never ever call an async method 44000 times. It takes 2 seconds to do so!
     //    Future.wait(mapReadResult.ways.map((way) => _renderWay(renderContext, PolylineContainer(way, renderContext.job.tile))));
     for (Way way in datastoreBundle.ways) {
-      WayProperties wayProperties = WayProperties(way, projection);
-      MapRectangle rectangle = wayProperties.getBoundaryAbsolute();
-      // filter small ways
-      if (rectangle.getWidth() < 5 && rectangle.getHeight() < 5) continue;
-      if (wayProperties.getCoordinatesAbsolute().isNotEmpty) {
-        List<Renderinstruction> renderinstructions;
-        if (wayProperties.isClosedWay) {
-          renderinstructions = _retrieveShapesForClosedWay(tile, renderthemeLevel, wayProperties);
-        } else {
-          renderinstructions = _retrieveShapesForOpenWay(tile, renderthemeLevel, wayProperties);
+      if (way.latLongs.isEmpty || way.latLongs[0].isEmpty) continue;
+      // Rule matching FIRST: it is tag-cached (one map lookup for repeated
+      // tag sets) and way-count bound, while geometry projection is
+      // point-count bound and allocates per coordinate. Ways without rules
+      // at this zoom die here for free.
+      final bool closedWay = LatLongUtils.isClosedWay(way.latLongs[0]);
+      final List<Renderinstruction> renderinstructions = closedWay ? renderthemeLevel.matchClosedWay(tile, way) : renderthemeLevel.matchOpenWay(tile, way);
+      if (renderinstructions.isEmpty) continue;
+
+      // Same "smaller than 5x5 px" filter as always, but computed on the RAW
+      // coordinates before any projection/allocation: Mercator x is linear in
+      // longitude and y monotonic in latitude, so the exact pixel extent
+      // needs only a min/max scan plus two latitude projections. At low zoom
+      // this rejects the vast majority of ways almost for free.
+      final List<ILatLong> outer = way.latLongs[0];
+      double minLat = outer[0].latitude, maxLat = minLat;
+      double minLon = outer[0].longitude, maxLon = minLon;
+      for (int i = 1; i < outer.length; i++) {
+        final ILatLong p = outer[i];
+        final double lat = p.latitude;
+        final double lon = p.longitude;
+        if (lat < minLat) {
+          minLat = lat;
+        } else if (lat > maxLat) {
+          maxLat = lat;
         }
-        if (renderinstructions.isEmpty) continue;
-        LayerContainer layerContainer = layerContainerCollection.getLayer(way.layer);
-        for (Renderinstruction renderinstruction in renderinstructions) {
-          renderinstruction.matchWay(layerContainer, wayProperties);
+        if (lon < minLon) {
+          minLon = lon;
+        } else if (lon > maxLon) {
+          maxLon = lon;
         }
+      }
+      if ((maxLon - minLon) / 360 * projection.mapsize < 5 && projection.latitudeToPixelY(minLat) - projection.latitudeToPixelY(maxLat) < 5) {
+        continue;
+      }
+
+      final WayProperties wayProperties = WayProperties(way, projection, isClosedWay: closedWay);
+      if (wayProperties.getCoordinatesAbsolute().isEmpty) continue;
+      final LayerContainer layerContainer = layerContainerCollection.getLayer(way.layer);
+      for (Renderinstruction renderinstruction in renderinstructions) {
+        renderinstruction.matchWay(layerContainer, wayProperties);
       }
     }
     // if (mapReadResult.isWater) {
     //   _renderWaterBackground(renderContext);
     // }
     layerContainerCollection.reduce();
-  }
-
-  List<Renderinstruction> _retrieveShapesForClosedWay(Tile tile, RenderthemeZoomlevel renderthemeLevel, WayProperties wayProperties) {
-    List<Renderinstruction> shapes = renderthemeLevel.matchClosedWay(tile, wayProperties.way);
-    return shapes;
-  }
-
-  List<Renderinstruction> _retrieveShapesForOpenWay(Tile tile, RenderthemeZoomlevel renderthemeLevel, WayProperties wayProperties) {
-    List<Renderinstruction> shapes = renderthemeLevel.matchOpenWay(tile, wayProperties.way);
-    return shapes;
   }
 }
