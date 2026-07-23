@@ -96,11 +96,16 @@ class _ScaleGestureDetectorState extends State<ScaleGestureDetector> with Single
               mapModel: widget.mapModel,
               animateSnap: _animateSnapAndCommit,
             );
-            _handler!._addOffset(event.pointer, event.position);
+            // localPosition, NOT position: the focal point feeds normalize()
+            // and the transform origin, which both work in this widget's own
+            // coordinate space. The global position is offset by everything
+            // above/around the map (app bar etc.), which skewed every
+            // focal-anchored zoom commit.
+            _handler!._addOffset(event.pointer, event.localPosition);
           },
           onPointerMove: (event) {
             if (doLog) _log.info("onPointerMove $event ${event.pointer}");
-            _handler?._movePointer(event.pointer, event.position);
+            _handler?._movePointer(event.pointer, event.localPosition);
           },
           onPointerUp: (event) {
             if (doLog) _log.info("onPointerUp $event ${event.pointer}");
