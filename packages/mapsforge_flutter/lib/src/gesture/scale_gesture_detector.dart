@@ -198,12 +198,27 @@ class _Handler {
     }
     _Vector newVector = _Vector(_points.values.first, _points.values.last);
     if (newVector.getLength().isNaN) return;
+    // A pinch-IN often starts with the fingers almost touching: a base length
+    // of a few pixels turns finger noise into huge jittery scale factors.
+    // Re-anchor until the fingers are meaningfully apart.
+    if (_startVector!.getLength() < 30) {
+      _startVector = newVector;
+      _lastVector = newVector;
+      return;
+    }
     double effective = newVector.getLength() / _startVector!.getLength() / _committedFactor;
     // Progressive commit (Google-Maps-style): once the pinch crosses a full
     // zoom level, commit it NOW and rebase, so fresh tiles render DURING a
     // long pinch instead of only at release — otherwise a deep pinch-out
     // just shrinks the old tiles into a dot on the background.
-    if ((effective >= 2.0 || effective <= 0.5) && DateTime.now().difference(_lastCommitAt) >= _commitInterval) {
+    // The time throttle protects the render pipeline from fast pinches, but
+    // is BYPASSED once the gesture runs 2+ levels past the last commit:
+    // unlike a pinch-out (physically bounded at ~1/4), a pinch-in from
+    // nearly-touching fingers can reach 20-30x — without the bypass the view
+    // magnifies into a giant blur while waiting for the throttle.
+    final bool crossed = effective >= 2.0 || effective <= 0.5;
+    final bool farCrossed = effective >= 4.0 || effective <= 0.25;
+    if (crossed && (farCrossed || DateTime.now().difference(_lastCommitAt) >= _commitInterval)) {
       final int zoomLevelDiff = (log(effective) / log(2)).truncate();
       final int achieved = _commitZoomStep(zoomLevelDiff, newVector.getFocalPoint());
       if (achieved != 0) {
