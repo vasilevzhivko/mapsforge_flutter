@@ -138,7 +138,21 @@ class TileJobQueue extends ChangeNotifier {
   /// at its min-entries (one screenful) floor. Cross-cache eviction is safe —
   /// each queue's onEvict/zombie logic protects its displayed tiles.
   static void _enforceGlobalTileBudget() {
-    final int budget = MapsforgeSettingsMgr().tileBitmapBudgetBytes;
+    int budget = MapsforgeSettingsMgr().tileBitmapBudgetBytes;
+    // The effective budget can never be below what is actually ON SCREEN:
+    // on a large/high-dpr viewport the per-queue one-screenful floors alone
+    // can exceed a small configured budget, and enforcement would then only
+    // thrash displayed tiles out of the caches into the (unfreeable,
+    // still-displayed) zombie set — costing re-renders without freeing
+    // anything. Give the visible working set 1.5x headroom.
+    final double tileSize = MapsforgeSettingsMgr().tileSize;
+    final int bytesPerTile = (tileSize * tileSize * 4).round();
+    int floorBytes = 0;
+    for (final TileJobQueue queue in _instances) {
+      floorBytes += queue._cache.minEntries * bytesPerTile;
+    }
+    final int adaptive = floorBytes * 3 ~/ 2;
+    if (adaptive > budget) budget = adaptive;
     // Zombies are not in any cache's weight; during heavy multi-level zoom
     // churn they can briefly dwarf the caches (observed 221MB live vs a 64MB
     // budget). When the TRUE live total runs past the budget, sweep every
