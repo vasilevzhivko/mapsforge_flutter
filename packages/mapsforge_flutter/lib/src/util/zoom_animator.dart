@@ -48,6 +48,10 @@ class ZoomAnimator {
     _finishActive();
     final MapPosition? start = mapModel.lastPosition;
     if (start == null) return;
+    // Respect the model's zoom bounds: zoomToAround would clamp the zoom but
+    // still recentre, so without this guard a double-tap at max zoom played
+    // the whole animation and then snapped back while moving the map.
+    if (start.zoomlevel >= mapModel.zoomlevelRange.zoomlevelMax) return;
     final double startLat = start.latitude, startLng = start.longitude;
     final int targetZoom = start.zoomlevel + 1;
     _onTick = () {
@@ -74,7 +78,7 @@ class ZoomAnimator {
   void animateZoomOut() {
     _finishActive();
     final MapPosition? start = mapModel.lastPosition;
-    if (start == null || start.zoomlevel <= 0) return;
+    if (start == null || start.zoomlevel <= mapModel.zoomlevelRange.zoomlevelMin) return;
     mapModel.setPosition(start.zoomOut().scaleAround(null, 2));
     _onTick = () {
       mapModel.scaleAround(null, 2 - _progress.value);
