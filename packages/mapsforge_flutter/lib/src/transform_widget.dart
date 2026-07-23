@@ -39,12 +39,18 @@ class TransformWidget extends StatelessWidget {
           child: Transform.scale(
             //scale for pinch'n'zoom (see FlutterGestureDetector._ScaleEvent)
             scale: mapPosition.scale,
+            // Without a focal point, scaling must anchor at the SCREEN CENTER,
+            // which after the outer translate lies at (0,0) of this child's
+            // space — i.e. origin (-halfWidth, -halfHeight) relative to the
+            // default box-center alignment (same origin the rotation below
+            // uses). Leaving origin null anchored half a screen off-center,
+            // making "centered" animated zooms drift sideways.
             origin: mapPosition.focalPoint != null
                 ? Offset(
                     -halfWidth - (halfWidth - mapPosition.focalPoint!.dx) * viewScaleFactor,
                     -halfHeight - (halfHeight - mapPosition.focalPoint!.dy) * viewScaleFactor,
                   )
-                : null,
+                : Offset(-halfWidth, -halfHeight),
             child: Transform.rotate(
               // rotate if the map should be rotated
               angle: mapPosition.rotationRadian,
