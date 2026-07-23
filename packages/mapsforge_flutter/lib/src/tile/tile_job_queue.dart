@@ -67,6 +67,9 @@ class TileJobQueue extends ChangeNotifier {
   /// across all of them.
   static final Set<TileJobQueue> _instances = {};
 
+  /// Last time the overrun condition triggered a sweep of ALL queues.
+  static DateTime _lastGlobalSweep = DateTime.fromMillisecondsSinceEpoch(0);
+
   TileJobQueue({required this.mapModel, required this.renderer}) {
     _cache = WeightedLruCache<Tile, TilePicture?>(
       maxWeightBytes: math.max(1 << 20, (renderer.tileCacheShare * MapsforgeSettingsMgr().tileBitmapBudgetBytes).round()),
@@ -157,10 +160,16 @@ class TileJobQueue extends ChangeNotifier {
     // churn they can briefly dwarf the caches (observed 221MB live vs a 64MB
     // budget). When the TRUE live total runs past the budget, sweep every
     // queue first — tiles still on screen survive the sweep, so this only
-    // reclaims what nothing references anymore.
+    // reclaims what nothing references anymore. Throttled: enforcement runs
+    // on EVERY tile insert, and during churn the overrun condition is almost
+    // always true — unthrottled this swept per insert.
     if (TileImageStats.megabytes * 1024 * 1024 > budget * 1.5) {
-      for (final TileJobQueue queue in _instances) {
-        queue._sweepZombies();
+      final DateTime now = DateTime.now();
+      if (now.difference(_lastGlobalSweep) >= const Duration(milliseconds: 250)) {
+        _lastGlobalSweep = now;
+        for (final TileJobQueue queue in _instances) {
+          queue._sweepZombies();
+        }
       }
     }
     int total = 0;
@@ -184,16 +193,21 @@ class TileJobQueue extends ChangeNotifier {
   }
 
   /// Disposes every zombie picture that is no longer referenced by the
-  /// current or pending tileSet.
+  /// current, pending or previous (underlay) tileSet.
   void _sweepZombies() {
     if (_zombies.isEmpty) return;
+    // Build the referenced set ONCE: checking containsValue per zombie made
+    // this O(zombies x tiles) hash-map iteration, and — being invoked from
+    // the per-insert budget enforcement — it became the single largest CPU
+    // consumer in device profiles (38%).
+    final Set<TilePicture> referenced = <TilePicture>{};
+    if (_currentJob != null) referenced.addAll(_currentJob!.tileSet.images.values);
+    if (_pendingJob != null) referenced.addAll(_pendingJob!.tileSet.images.values);
+    if (_previousJob != null) referenced.addAll(_previousJob!.tileSet.images.values);
     _zombies.removeWhere((picture) {
-      final bool referenced =
-          (_currentJob?.tileSet.images.containsValue(picture) ?? false) ||
-          (_pendingJob?.tileSet.images.containsValue(picture) ?? false) ||
-          (_previousJob?.tileSet.images.containsValue(picture) ?? false);
-      if (!referenced) _disposePicture(picture);
-      return !referenced;
+      if (referenced.contains(picture)) return false;
+      _disposePicture(picture);
+      return true;
     });
   }
 
