@@ -81,6 +81,17 @@ class _ScaleGestureDetectorState extends State<ScaleGestureDetector> with Single
     _snapController.forward(from: 0.0);
   }
 
+  /// Finishes a still-running release snap INSTANTLY (committing its pending
+  /// zoom) so a new two-finger gesture starts from a settled state. Without
+  /// this the snap's ticker kept fighting the new gesture's scaleAround and
+  /// its deferred commit fired mid-gesture on top of the new gesture's zoom.
+  void _finishSnap() {
+    if (_snapController.isAnimating) _snapController.stop();
+    final commit = _snapCommit;
+    _snapCommit = null;
+    commit?.call();
+  }
+
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
@@ -95,6 +106,7 @@ class _ScaleGestureDetectorState extends State<ScaleGestureDetector> with Single
               lastPosition: widget.mapModel.lastPosition!,
               mapModel: widget.mapModel,
               animateSnap: _animateSnapAndCommit,
+              finishSnap: _finishSnap,
             );
             // localPosition, NOT position: the focal point feeds normalize()
             // and the transform origin, which both work in this widget's own
@@ -156,6 +168,9 @@ class _Handler {
     required VoidCallback commit,
   }) animateSnap;
 
+  /// Instantly completes a pending release-snap (see state._finishSnap).
+  final VoidCallback finishSnap;
+
   final Map<int, Offset> _points = {};
 
   _Vector? _startVector;
@@ -169,6 +184,7 @@ class _Handler {
     required this.mapModel,
     required this.size,
     required this.animateSnap,
+    required this.finishSnap,
   });
 
   void _addOffset(int id, Offset offset) {
@@ -176,7 +192,18 @@ class _Handler {
     if (_points.length != 2) {
       return;
     }
+    // A (re)formed two-finger contact is a NEW scale baseline. Users zoom in
+    // slow "ratchets" (spread, lift one finger, replant, spread again):
+    // carrying the committed factor / reference position over from the
+    // previous contact made every replant fire spurious commits from stale
+    // state and run the zoom away. Settle any pending release-snap first,
+    // then re-baseline everything.
+    finishSnap();
     _startVector = _Vector(_points.values.first, _points.values.last);
+    _lastVector = null;
+    lastPosition = mapModel.lastPosition!;
+    _committedFactor = 1;
+    _lastScale = 1;
   }
 
   bool _removeOffset(int id) {
