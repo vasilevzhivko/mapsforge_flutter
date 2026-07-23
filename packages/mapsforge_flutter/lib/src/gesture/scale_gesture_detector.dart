@@ -134,6 +134,16 @@ class _Handler {
   /// this, so the view stays continuous across mid-gesture commits.
   double _committedFactor = 1;
 
+  /// Minimum spacing between mid-gesture zoom commits. Each commit starts a
+  /// full tile render for its level; a FAST pinch crossing many levels would
+  /// otherwise flood the render pipeline with levels that are abandoned
+  /// milliseconds later, starving the level the user actually lands on.
+  /// A fast pinch thus commits at most every [_commitInterval] and the
+  /// release commit covers the remaining levels in one jump.
+  static const Duration _commitInterval = Duration(milliseconds: 350);
+
+  DateTime _lastCommitAt = DateTime.fromMillisecondsSinceEpoch(0);
+
   final void Function({
     required double fromScale,
     required double toScale,
@@ -193,12 +203,13 @@ class _Handler {
     // zoom level, commit it NOW and rebase, so fresh tiles render DURING a
     // long pinch instead of only at release — otherwise a deep pinch-out
     // just shrinks the old tiles into a dot on the background.
-    if (effective >= 2.0 || effective <= 0.5) {
+    if ((effective >= 2.0 || effective <= 0.5) && DateTime.now().difference(_lastCommitAt) >= _commitInterval) {
       final int zoomLevelDiff = (log(effective) / log(2)).truncate();
       final int achieved = _commitZoomStep(zoomLevelDiff, newVector.getFocalPoint());
       if (achieved != 0) {
         _committedFactor *= pow(2, achieved);
         effective = newVector.getLength() / _startVector!.getLength() / _committedFactor;
+        _lastCommitAt = DateTime.now();
       }
     }
     _lastScale = effective;
