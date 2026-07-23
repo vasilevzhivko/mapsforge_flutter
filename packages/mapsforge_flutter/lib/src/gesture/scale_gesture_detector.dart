@@ -239,6 +239,14 @@ class _Handler {
       return;
     }
     double effective = newVector.getLength() / _startVector!.getLength() / _committedFactor;
+    // Cap the visual stretch at the zoom bounds: past max zoom the scale
+    // would keep growing with nothing left to commit, and the release commit
+    // would then recentre with a factor that can never be applied.
+    final int zoom = mapModel.lastPosition!.zoomlevel;
+    final double maxEffective = pow(2, mapModel.zoomlevelRange.zoomlevelMax - zoom).toDouble();
+    final double minEffective = pow(2, mapModel.zoomlevelRange.zoomlevelMin - zoom).toDouble();
+    if (effective > maxEffective) effective = maxEffective;
+    if (effective < minEffective) effective = minEffective;
     // Progressive commit (Google-Maps-style): once the pinch crosses a full
     // zoom level, commit it NOW and rebase, so fresh tiles render DURING a
     // long pinch instead of only at release — otherwise a deep pinch-out
@@ -265,16 +273,21 @@ class _Handler {
   }
 
   /// Commits [zoomLevelDiff] levels around [focalPoint] mid-gesture, exactly
-  /// like the release commit. Returns the zoom delta actually achieved (the
-  /// model may clamp at its zoom bounds).
+  /// like the release commit. Returns the zoom delta actually achieved.
   int _commitZoomStep(int zoomLevelDiff, Offset focalPoint) {
-    final num mult = pow(2, zoomLevelDiff);
-    final PositionInfo positionInfo = RotateHelper.normalize(lastPosition, size, focalPoint.dx, focalPoint.dy);
     final int before = mapModel.lastPosition!.zoomlevel;
+    // Clamp to the model's zoom bounds FIRST. Calling zoomToAround past the
+    // bounds clamps the zoom but still applies the recentering — at max zoom
+    // that recentred the map over and over (once per retry) while never
+    // zooming, walking the view away under the user's fingers.
+    final int achievable = mapModel.zoomlevelRange.ensureBounds(before + zoomLevelDiff) - before;
+    if (achievable == 0) return 0;
+    final num mult = pow(2, achievable);
+    final PositionInfo positionInfo = RotateHelper.normalize(lastPosition, size, focalPoint.dx, focalPoint.dy);
     mapModel.zoomToAround(
       positionInfo.latitude + (mapModel.lastPosition!.latitude - positionInfo.latitude) / mult,
       positionInfo.longitude + (mapModel.lastPosition!.longitude - positionInfo.longitude) / mult,
-      before + zoomLevelDiff,
+      before + achievable,
     );
     lastPosition = mapModel.lastPosition!;
     return lastPosition.zoomlevel - before;
@@ -284,6 +297,10 @@ class _Handler {
     // no zoom: 0, double zoom: 1, half zoom: -1
     double zoomLevelOffset = log(_lastScale) / log(2);
     int zoomLevelDiff = zoomLevelOffset.round();
+    // Same clamp as _commitZoomStep: never recentre for zoom levels the
+    // model's bounds won't actually apply.
+    final int beforeZoom = mapModel.lastPosition!.zoomlevel;
+    zoomLevelDiff = mapModel.zoomlevelRange.ensureBounds(beforeZoom + zoomLevelDiff) - beforeZoom;
 
     // Fall back to screen centre if we never got a move event with 2 fingers
     final focalPoint = _lastVector?.getFocalPoint() ?? Offset(size.width / 2, size.height / 2);
