@@ -139,6 +139,16 @@ class TileJobQueue extends ChangeNotifier {
   /// each queue's onEvict/zombie logic protects its displayed tiles.
   static void _enforceGlobalTileBudget() {
     final int budget = MapsforgeSettingsMgr().tileBitmapBudgetBytes;
+    // Zombies are not in any cache's weight; during heavy multi-level zoom
+    // churn they can briefly dwarf the caches (observed 221MB live vs a 64MB
+    // budget). When the TRUE live total runs past the budget, sweep every
+    // queue first — tiles still on screen survive the sweep, so this only
+    // reclaims what nothing references anymore.
+    if (TileImageStats.megabytes * 1024 * 1024 > budget * 1.5) {
+      for (final TileJobQueue queue in _instances) {
+        queue._sweepZombies();
+      }
+    }
     int total = 0;
     for (final TileJobQueue queue in _instances) {
       total += queue._cache.totalWeight;
@@ -248,13 +258,16 @@ class TileJobQueue extends ChangeNotifier {
     return area * (fill > 1 ? 1 : fill);
   }
 
-  /// Drops the zoom-underlay once [job] (the current job) is fully rendered.
+  /// Drops the zoom-underlay once [job] (the current job) is fully rendered,
+  /// and sweeps zombies unconditionally at that point — completion is the
+  /// last position-independent moment to reclaim churn leftovers; without it
+  /// the final burst of evicted-while-displayed tiles sat unswept until the
+  /// NEXT gesture.
   void _releaseUnderlayIfComplete(_CurrentJob job) {
-    if (_previousJob == null || _currentJob != job) return;
-    if (job.tileSet.images.length >= job._expectedTiles) {
-      _previousJob = null;
-      _sweepZombies();
-    }
+    if (_currentJob != job) return;
+    if (job.tileSet.images.length < job._expectedTiles) return;
+    _previousJob = null;
+    _sweepZombies();
   }
 
   @override
