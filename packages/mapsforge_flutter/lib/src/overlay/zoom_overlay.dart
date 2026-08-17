@@ -29,7 +29,14 @@ class _ZoomOverlayState extends State<ZoomOverlay> with TickerProviderStateMixin
   late AnimationController _fadeAnimationController;
   late CurvedAnimation _fadeAnimation;
 
-  late final ZoomAnimator _zoomAnimator = ZoomAnimator(mapModel: widget.mapModel, vsync: this);
+  // Nullable (not `late final`): a `late final` initialises on first access, and
+  // if the buttons were never tapped that first access is dispose() — which would
+  // build an AnimationController (→ TickerMode.of) on a deactivating widget and
+  // throw "deactivated ancestor". Lazy-create via _ensureZoomAnimator instead.
+  ZoomAnimator? _zoomAnimator;
+
+  ZoomAnimator get _ensureZoomAnimator =>
+      _zoomAnimator ??= ZoomAnimator(mapModel: widget.mapModel, vsync: this);
 
   @override
   void initState() {
@@ -48,7 +55,7 @@ class _ZoomOverlayState extends State<ZoomOverlay> with TickerProviderStateMixin
   @override
   void dispose() {
     _fadeAnimationController.dispose();
-    _zoomAnimator.dispose();
+    _zoomAnimator?.dispose();
     super.dispose();
   }
 
@@ -84,7 +91,7 @@ class _ZoomOverlayState extends State<ZoomOverlay> with TickerProviderStateMixin
             RawMaterialButton(
               onPressed: () {
                 if (widget.mapModel.lastPosition == null) return;
-                _zoomAnimator.animateZoomInCentered();
+                _ensureZoomAnimator.animateZoomInCentered();
               },
               elevation: 2.0,
               fillColor: fillColor,
@@ -98,7 +105,7 @@ class _ZoomOverlayState extends State<ZoomOverlay> with TickerProviderStateMixin
             RawMaterialButton(
               onPressed: () {
                 if (widget.mapModel.lastPosition == null) return;
-                _zoomAnimator.animateZoomOut();
+                _ensureZoomAnimator.animateZoomOut();
               },
               elevation: 2.0,
               fillColor: fillColor,

@@ -21,12 +21,19 @@ class ZoomInOverlay extends StatefulWidget {
 
 class _ZoomInOverlayState extends State<ZoomInOverlay>
     with SingleTickerProviderStateMixin {
-  late final ZoomAnimator _animator =
-      ZoomAnimator(mapModel: widget.mapModel, vsync: this);
+  // Created lazily on the first zoom (NOT `late final`): a `late final` would be
+  // initialised on its first access — and if the user never double-tapped, that
+  // first access is dispose(), which would spin up an AnimationController (→
+  // TickerMode.of) on an already-deactivating widget → "deactivated ancestor"
+  // assertion. Keeping it nullable means dispose() only tears down what exists.
+  ZoomAnimator? _animator;
+
+  ZoomAnimator get _ensureAnimator =>
+      _animator ??= ZoomAnimator(mapModel: widget.mapModel, vsync: this);
 
   @override
   void dispose() {
-    _animator.dispose();
+    _animator?.dispose();
     super.dispose();
   }
 
@@ -43,7 +50,7 @@ class _ZoomInOverlayState extends State<ZoomInOverlay>
           // Glide the center halfway toward the tapped location (the classic
           // double-tap behaviour). A second tap mid-animation commits the
           // running zoom instantly and chains from there.
-          _animator.animateZoomIn(
+          _ensureAnimator.animateZoomIn(
             (event.latitude - lastPosition.latitude) / 2 +
                 lastPosition.latitude,
             (event.longitude - lastPosition.longitude) / 2 +
