@@ -213,6 +213,11 @@ class HgtHillshadeOverlayRenderer extends Renderer {
   @override
   bool get transparentOnMiss => true;
 
+  // The relief is computed from HGT data in an isolate and lands ~1s after the
+  // base map, so fade it in instead of popping the shading on suddenly.
+  @override
+  bool get fadeInTiles => true;
+
   Future<TilePicture> _transparentTile(int tileSize) async {
     final rec = ui.PictureRecorder();
     ui.Canvas(rec,

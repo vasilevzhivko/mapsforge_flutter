@@ -23,7 +23,11 @@ mixin StrokeSrcMixin {
 
   void setStrokeWidth(double strokeWidth) {
     assert(strokeWidth >= 0);
-    _strokeWidth = strokeWidth * MapsforgeSettingsMgr().getDeviceScaleFactor();
+    // Device ratio keeps lines crisp per-DPI; the line factor is the user's
+    // "map line thickness" preference (1.0 = as authored).
+    _strokeWidth = strokeWidth *
+        MapsforgeSettingsMgr().getDeviceScaleFactor() *
+        MapsforgeSettingsMgr().getLineScaleFactor();
   }
 
   double get strokeWidth => _strokeWidth;

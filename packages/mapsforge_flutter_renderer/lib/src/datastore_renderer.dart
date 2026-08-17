@@ -92,6 +92,12 @@ class IsolateDatastoreRenderer implements Renderer {
 
   @override
   int? get backgroundColor => null;
+
+  @override
+  bool get fadeInTiles => false;
+
+  @override
+  Duration get tileFadeInDuration => const Duration(milliseconds: 200);
 }
 
 //////////////////////////////////////////////////////////////////////////////

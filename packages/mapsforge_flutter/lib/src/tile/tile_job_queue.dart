@@ -220,10 +220,18 @@ class TileJobQueue extends ChangeNotifier {
         _currentJob?.tileSet.mapPosition.longitude == position.longitude &&
         _currentJob?.tileSet.mapPosition.zoomlevel == position.zoomlevel &&
         _currentJob?.tileSet.mapPosition.indoorLevel == position.indoorLevel) {
-      // do not recalculate for rotation or scaling
-      TileSet tileSet = TileSet(center: _currentJob!.tileSet.center, mapPosition: position);
-      tileSet.images.addEntries(_currentJob!.tileSet.images.entries);
+      // do not recalculate for rotation or scaling. SHARE the images map (not a
+      // copy) so tiles still being produced for this position — whose producers
+      // write into the old job's map — remain visible after this update
+      // supersedes it. Copying orphaned those in-flight tiles, leaving the map
+      // partly rendered until the next pan (visible especially after zoom-out).
+      TileSet tileSet = TileSet(
+        center: _currentJob!.tileSet.center,
+        mapPosition: position,
+        images: _currentJob!.tileSet.images,
+      );
       _CurrentJob myJob = _CurrentJob(_currentJob!.tileDimension, tileSet);
+      myJob._expectedTiles = _currentJob!._expectedTiles; // same tiles as before
       _currentJob = myJob;
       _emitTileSetBatched(_currentJob!.tileSet);
       return;
@@ -480,10 +488,16 @@ class TileJobQueue extends ChangeNotifier {
     if (_pendingJob == myJob) {
       _promoteToCurrent(myJob);
     }
-    // Only emit if this is now the current displayed job.
-    if (_currentJob == myJob) {
-      _releaseUnderlayIfComplete(myJob);
-      _emitTileSetBatched(tileSet);
+    // Emit if this freshly produced tile is part of what's currently displayed.
+    // That is true when myJob is current, AND when a scale/rotation update has
+    // since superseded myJob with a job that SHARES its image map (the producer
+    // wrote into that shared map). Comparing the map identity covers both;
+    // without it, tiles finishing after such an update stayed cached-but-hidden
+    // until the next pan.
+    final _CurrentJob? current = _currentJob;
+    if (current != null && identical(current.tileSet.images, tileSet.images)) {
+      _releaseUnderlayIfComplete(current);
+      _emitTileSetBatched(current.tileSet);
     }
   }
 

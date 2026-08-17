@@ -105,7 +105,7 @@ class RenderThemeBuilder {
     RenderThemeBuilder renderThemeBuilder = RenderThemeBuilder._(excludeIds: excludeIds);
     renderThemeBuilder._parseXml(content);
     renderThemeBuilder.forHash =
-        "${MapsforgeSettingsMgr().getDeviceScaleFactor()}_${MapsforgeSettingsMgr().getUserScaleFactor()}_${MapsforgeSettingsMgr().getFontScaleFactor()}_${MapsforgeSettingsMgr().tileSize}";
+        "${MapsforgeSettingsMgr().getDeviceScaleFactor()}_${MapsforgeSettingsMgr().getUserScaleFactor()}_${MapsforgeSettingsMgr().getLineScaleFactor()}_${MapsforgeSettingsMgr().getFontScaleFactor()}_${MapsforgeSettingsMgr().tileSize}";
     return renderThemeBuilder._build();
   }
 

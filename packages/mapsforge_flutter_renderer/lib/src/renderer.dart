@@ -87,4 +87,14 @@ abstract class Renderer {
   /// — the off-zoom tiles would evict the visible ones and cause flicker while
   /// panning. Defaults true.
   bool get prefetchAdjacentZooms => true;
+
+  /// Whether this renderer's tiles should fade in (rather than pop) when a new
+  /// zoom level's tiles first appear. Meant for a slow overlay like hillshade
+  /// that lands ~1s after the base map — the abrupt full-opacity appearance is
+  /// jarring, so the layer ramps 0→1 over a short duration instead. Defaults
+  /// false so the vector base stays instant/byte-identical.
+  bool get fadeInTiles => false;
+
+  /// Duration of the [fadeInTiles] ramp.
+  Duration get tileFadeInDuration => const Duration(milliseconds: 200);
 }

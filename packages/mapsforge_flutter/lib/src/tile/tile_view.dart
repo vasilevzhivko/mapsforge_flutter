@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:mapsforge_flutter/mapsforge.dart';
 import 'package:mapsforge_flutter/src/tile/tile_job_queue.dart';
@@ -25,17 +27,45 @@ class TileView extends StatefulWidget {
 
 //////////////////////////////////////////////////////////////////////////////
 
-class _TileViewState extends State<TileView> {
+class _TileViewState extends State<TileView> with SingleTickerProviderStateMixin {
   late final TileJobQueue jobQueue;
+
+  /// For renderers with [Renderer.fadeInTiles] (e.g. hillshade): ramps 0→1 when
+  /// a new zoom's tiles first appear so the slow overlay fades in instead of
+  /// popping. Null for normal (instant) layers.
+  AnimationController? _fade;
+
+  /// Zoom level we last started a fade for, so panning at the same zoom (which
+  /// keeps existing tiles) doesn't re-fade and dim the already-visible layer.
+  int? _fadedZoom;
 
   @override
   void initState() {
     super.initState();
     jobQueue = TileJobQueue(mapModel: widget.mapModel, renderer: widget.renderer);
+    if (widget.renderer.fadeInTiles) {
+      _fade = AnimationController(vsync: this, duration: widget.renderer.tileFadeInDuration);
+      jobQueue.addListener(_onTilesChanged);
+    }
+  }
+
+  /// Kick the fade the first time the current zoom's tileSet becomes non-empty.
+  void _onTilesChanged() {
+    final controller = _fade;
+    if (controller == null) return;
+    final tileSet = jobQueue.tileSet;
+    if (tileSet == null || tileSet.images.isEmpty) return;
+    final zoom = tileSet.mapPosition.zoomlevel;
+    if (zoom != _fadedZoom) {
+      _fadedZoom = zoom;
+      unawaited(controller.forward(from: 0));
+    }
   }
 
   @override
   void dispose() {
+    if (_fade != null) jobQueue.removeListener(_onTilesChanged);
+    _fade?.dispose();
     jobQueue.dispose();
     super.dispose();
   }
@@ -83,9 +113,29 @@ class _TileViewState extends State<TileView> {
             // We do not have a position yet or we wait for processing of the first tiles
             //          return const SizedBox.expand();
           },
-          child: CustomPaint(foregroundPainter: TilePainter(jobQueue, opacity: widget.opacity), child: const SizedBox.expand()),
+          child: _buildPainter(),
         );
       },
+    );
+  }
+
+  /// The tile painter, wrapped in an [AnimatedBuilder] when this layer fades in
+  /// so the painter is rebuilt with the ramped opacity each frame. TilePainter
+  /// already repaints on an opacity change, so no extra plumbing is needed.
+  Widget _buildPainter() {
+    final controller = _fade;
+    if (controller == null) {
+      return CustomPaint(
+        foregroundPainter: TilePainter(jobQueue, opacity: widget.opacity),
+        child: const SizedBox.expand(),
+      );
+    }
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) => CustomPaint(
+        foregroundPainter: TilePainter(jobQueue, opacity: widget.opacity * controller.value),
+        child: const SizedBox.expand(),
+      ),
     );
   }
 }

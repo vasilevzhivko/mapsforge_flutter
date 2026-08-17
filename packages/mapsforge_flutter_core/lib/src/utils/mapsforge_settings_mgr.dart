@@ -72,11 +72,20 @@ class MapsforgeSettingsMgr {
   /// Note: This does not affect text rendering, only map elements.
   double _userScaleFactor = 1;
 
+  /// User-requested multiplier applied to line/way stroke widths only.
+  ///
+  /// 1.0 = the theme's stroke widths as authored. Values below 1 draw thinner
+  /// lines, above 1 thicker. Unlike [_userScaleFactor] this affects ONLY stroke
+  /// widths (via StrokeSrcMixin.setStrokeWidth) — not text, symbols or tiles.
+  double _lineScaleFactor = 1;
+
   /// Maximum text width factor relative to tile size.
   ///
   /// Prevents text from spanning too many neighboring tiles, which could
-  /// cause truncation issues in tile-based rendering.
-  final double maxTextWidthFactor = 0.95;
+  /// cause truncation issues in tile-based rendering. Raised from 0.95 so long
+  /// single-word place names (e.g. "Благоевград") stay on one line instead of
+  /// wrapping; labels render in the dedicated label layer, not clipped to tiles.
+  final double maxTextWidthFactor = 1.6;
 
   late double maxTextWidth;
 
@@ -133,6 +142,11 @@ class MapsforgeSettingsMgr {
     _userScaleFactor = userScaleFactor;
   }
 
+  void setLineScaleFactor(double lineScaleFactor) {
+    assert(lineScaleFactor > 0);
+    _lineScaleFactor = lineScaleFactor;
+  }
+
   void setFontScaleFactor(double fontScaleFactor) {
     _fontScaleFactor = fontScaleFactor;
   }
@@ -143,6 +157,8 @@ class MapsforgeSettingsMgr {
   }
 
   double getUserScaleFactor() => _userScaleFactor;
+
+  double getLineScaleFactor() => _lineScaleFactor;
 
   double getDeviceScaleFactor() => _deviceScaleFactor;
 
