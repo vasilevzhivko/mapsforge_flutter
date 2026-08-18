@@ -152,16 +152,26 @@ class LabelJobQueue extends ChangeNotifier {
 
   Future<void> _produceLabel(_CurrentJob myJob, LabelSet labelSet, int left, int top, MapPosition position, int maxTileNbr) async {
     if (myJob._abort) return;
-    Tile leftUpper = Tile(left, top, position.zoomlevel, position.indoorLevel);
-    Tile rightLower = Tile(min(left + _range - 1, maxTileNbr), min(top + _range - 1, maxTileNbr), position.zoomlevel, position.indoorLevel);
-    RenderInfoCollection collection = await _cache.getOrProduce(leftUpper, rightLower, (Tile tile) async {
-      JobResult result = await renderer.retrieveLabels(JobRequest(leftUpper, rightLower));
-      if (result.renderInfo == null) throw Exception("No renderInfo for $tile from renderer ${renderer.getRenderKey()}");
-      return result.renderInfo!;
-    });
-    if (myJob._abort) return;
-    labelSet.renderInfos.add(collection);
-    _emitLabelSetBatched(labelSet);
+    try {
+      Tile leftUpper = Tile(left, top, position.zoomlevel, position.indoorLevel);
+      Tile rightLower = Tile(min(left + _range - 1, maxTileNbr), min(top + _range - 1, maxTileNbr), position.zoomlevel, position.indoorLevel);
+      RenderInfoCollection collection = await _cache.getOrProduce(leftUpper, rightLower, (Tile tile) async {
+        JobResult result = await renderer.retrieveLabels(JobRequest(leftUpper, rightLower));
+        if (result.renderInfo == null) throw Exception("No renderInfo for $tile from renderer ${renderer.getRenderKey()}");
+        return result.renderInfo!;
+      });
+      if (myJob._abort) return;
+      labelSet.renderInfos.add(collection);
+      _emitLabelSetBatched(labelSet);
+    } catch (_) {
+      // Producing labels for this tile batch failed. This runs as an unawaited
+      // task, so any throw here escapes into the global zone and is logged as a
+      // fatal. The usual causes are all benign/transient: the MapModel was
+      // disposed mid-render (the reader isolate is gone, #511/#736), the
+      // datastore had no data for the tile (#577), or a corrupt layer/geometry
+      // value tripped an error deep in the read (#512). Swallow it — the batch
+      // re-renders on the next position/render event.
+    }
   }
 
   /// Emit tile set with batching to reduce stream emissions

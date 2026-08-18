@@ -2,6 +2,7 @@ import 'package:mapsforge_flutter_core/buffer.dart';
 import 'package:mapsforge_flutter_core/model.dart';
 import 'package:mapsforge_flutter_mapfile/mapfile.dart';
 import 'package:mapsforge_flutter_mapfile/mapfile_debug.dart';
+import 'package:mapsforge_flutter_mapfile/src/exceptions/mapfile_exception.dart';
 import 'package:mapsforge_flutter_mapfile/src/model/mapfile_info.dart';
 import 'package:mapsforge_flutter_mapfile/src/reader/map_header_info_builder.dart';
 import 'package:mapsforge_flutter_mapfile/src/reader/subfile_parameter_builder.dart';
@@ -69,10 +70,19 @@ class MapfileInfoBuilder {
     Readbuffer readBuffer = await (readBufferSource.readFromFile(magicByteLength + 4));
 
     // get and check the magic byte
-    String magicByte = readBuffer.readUTF8EncodedString2(magicByteLength);
+    String magicByte;
+    try {
+      magicByte = readBuffer.readUTF8EncodedString2(magicByteLength);
+    } on FormatException {
+      // The first bytes are not valid UTF-8: this is not a mapsforge map file
+      // at all — typically a truncated/partial download or an HTTP error body
+      // saved to disk. Surface a typed, catchable MapFileException instead of
+      // letting the raw FormatException escape to the global zone (#554 #555).
+      throw MapFileException("invalid magic byte: file is not a mapsforge map (corrupt or truncated)");
+    }
 
     if (BINARY_OSM_MAGIC_BYTE != (magicByte)) {
-      throw Exception("invalid magic byte: $magicByte");
+      throw MapFileException("invalid magic byte: $magicByte");
     }
     return readBuffer;
   }

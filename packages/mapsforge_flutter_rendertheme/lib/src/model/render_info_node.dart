@@ -12,7 +12,11 @@ class RenderInfoNode<T extends Renderinstruction> extends RenderInfo<T> {
 
   @override
   void render(RenderContext renderContext) {
-    shapePainter!.renderNode(this, renderContext, nodeProperties);
+    // shapePainter can be momentarily null if the marker/render state was
+    // cleared mid-frame (e.g. a marker datastore cleared while a paint pass was
+    // still iterating over its infos). Skip painting instead of crashing with a
+    // "Null check operator used on a null value" that escapes to a fatal (#515).
+    shapePainter?.renderNode(this, renderContext, nodeProperties);
   }
 
   // Returns true if shapes clash with each other

@@ -68,6 +68,24 @@ class FlutterIsolateInstance {
     _isolate?.kill();
     _isolate = null;
     _sendPort = null;
+    // Fail any still-in-flight computations right away. Their reply can never
+    // arrive now (the isolate is gone), so their completers would otherwise
+    // hang forever — and the caller's wrapping Future.timeout (ecache uses a
+    // 60s timeout per tile/label producer) fires much later into the global
+    // zone as a fatal-looking TimeoutException (#534). Erroring now takes the
+    // exact same path callers already handle for a disposed isolate: they skip
+    // the tile/label instead of crashing. #511 #736
+    if (_flutterProcesses.isNotEmpty) {
+      final List<_FlutterProcess> pending = _flutterProcesses.values.toList();
+      _flutterProcesses.clear();
+      for (final _FlutterProcess process in pending) {
+        if (!process._completer.isCompleted) {
+          process._completer.completeError(
+            StateError('Isolate unavailable (not started yet or already disposed)'),
+          );
+        }
+      }
+    }
   }
 
   /// Starts a new isolate. Optionally handle parameters to the isolate for initialization. This should be done if the parameters are the same for all future

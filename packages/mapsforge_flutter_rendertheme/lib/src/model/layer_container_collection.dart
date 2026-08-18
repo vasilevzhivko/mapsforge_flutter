@@ -19,6 +19,15 @@ class LayerContainerCollection {
   }
 
   LayerContainer getLayer(int layer) {
+    // The mapfile reserves 4 bits for the layer value (0-15) but we only keep
+    // MAX_DRAWING_LAYERS containers. A corrupt or out-of-range layer value
+    // (observed: 12) would otherwise throw a RangeError from deep inside the
+    // render pipeline and surface as a fatal zone error (#512). Clamp it.
+    if (layer < 0) {
+      layer = 0;
+    } else if (layer >= MAX_DRAWING_LAYERS) {
+      layer = MAX_DRAWING_LAYERS - 1;
+    }
     return _drawingLayers.elementAt(layer);
   }
 
