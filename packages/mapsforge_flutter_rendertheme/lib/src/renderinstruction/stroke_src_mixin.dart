@@ -85,6 +85,17 @@ mixin StrokeSrcMixin {
   }
 
   void setStrokeDashArray(List<double>? strokeDashArray) {
+    if (strokeDashArray != null) {
+      // Scale the dash pattern by the user's "map line thickness" preference, the
+      // same factor setStrokeWidth applies to the width. Otherwise the coloured
+      // route "ties" (dashed overlays) keep their authored length/spacing while
+      // the line width shrinks/grows — so they visibly don't scale together.
+      final double lineFactor = MapsforgeSettingsMgr().getLineScaleFactor();
+      if (lineFactor != 1.0) {
+        strokeDashArray =
+            strokeDashArray.map((element) => element * lineFactor).toList();
+      }
+    }
     _strokeDashArray = strokeDashArray;
   }
 
