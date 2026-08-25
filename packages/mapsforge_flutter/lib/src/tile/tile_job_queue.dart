@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:math' as math;
 
 import 'package:flutter/cupertino.dart';
+import 'package:logging/logging.dart';
 import 'package:mapsforge_flutter/mapsforge.dart';
 import 'package:mapsforge_flutter/src/tile/tile_dimension.dart';
 import 'package:mapsforge_flutter/src/tile/tile_set.dart';
@@ -17,6 +18,15 @@ import 'package:mapsforge_flutter_renderer/ui.dart';
 /// position of the map changes [setPosition]. Based on these informations the tiles will be prepared
 /// and the painter will be triggered with [notifyListeners] as soon as tiles are available.
 class TileJobQueue extends ChangeNotifier {
+  static final _log = Logger('TileJobQueue');
+
+  // Throttled diagnostics for NoData ("empty") visible tiles — the other cause
+  // (besides a memory-pressure cache wipe) of a blank/blue map, e.g. zooming out
+  // past the map file's data extent. Aggregated so a blank frame doesn't spam a
+  // line per tile. #diag
+  static DateTime _lastMissLog = DateTime.fromMillisecondsSinceEpoch(0);
+  static int _missCount = 0;
+
   final MapModel mapModel;
 
   MapSize? _size;
@@ -447,8 +457,17 @@ class TileJobQueue extends ChangeNotifier {
       try {
         JobResult result = await renderer.executeJob(JobRequest(tile));
         if (result.picture == null) {
-          //return null;
-          // print("No picture for tile $tile");
+          // No render output for this tile → it draws as a NoData/transparent
+          // placeholder (a blank/blue tile). Aggregate + throttle so a whole
+          // blank frame logs one line, not one per tile. #diag
+          _missCount++;
+          final now = DateTime.now();
+          if (now.difference(_lastMissLog) > const Duration(seconds: 2)) {
+            _log.warning(
+                'NoData tiles x$_missCount (last zoom=${tile.zoomLevel}) — blank/blue tile, likely past map data extent or renderer miss');
+            _lastMissLog = now;
+            _missCount = 0;
+          }
           final miss = await (renderer.transparentOnMiss ? ImageHelper().createTransparentBitmap() : ImageHelper().createNoDataBitmap());
           TileImageStats.add(miss.imageWidth, miss.imageHeight);
           return miss;
@@ -459,8 +478,7 @@ class TileJobQueue extends ChangeNotifier {
         return result.picture!;
       } catch (error, stacktrace) {
         // error in ecache abort() method. The completer should be checked for isComplete() before injecting an exception
-        print(error);
-        print(stacktrace);
+        _log.warning('tile render failed for $tile', error, stacktrace);
         rethrow;
       }
     });
@@ -546,8 +564,7 @@ class TileJobQueue extends ChangeNotifier {
             picture = result.picture!;
           }
         } catch (e, st) {
-          print(e);
-          print(st);
+          _log.warning('prefetch tile render failed for $t', e, st);
           picture = await (renderer.transparentOnMiss ? ImageHelper().createTransparentBitmap() : ImageHelper().createNoDataBitmap());
         }
         TileImageStats.add(picture.imageWidth, picture.imageHeight);
@@ -559,7 +576,9 @@ class TileJobQueue extends ChangeNotifier {
         _zombies.add(produced);
       }
       _enforceGlobalTileBudget();
-    } catch (_) {}
+    } catch (e, st) {
+      _log.warning('prefetch tile failed for $tile', e, st);
+    }
   }
 
   /// Returns the tiles at [targetZoom] that cover the same viewport as
