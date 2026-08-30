@@ -54,13 +54,23 @@ class ZoomAnimator {
     if (start.zoomlevel >= mapModel.zoomlevelRange.zoomlevelMax) return;
     final double startLat = start.latitude, startLng = start.longitude;
     final int targetZoom = start.zoomlevel + 1;
+    // The map may be settled at a fractional zoom (scale in [1,2), see the
+    // pinch release logic). Start the animation from that scale and carry the
+    // fraction across the level change — except at the zoom ceiling, where
+    // the fraction is dropped (no fractional zoom past the last level).
+    final double startFraction = start.scale > 0 ? start.scale : 1;
+    final double endFraction = targetZoom >= mapModel.zoomlevelRange.zoomlevelMax ? 1.0 : startFraction;
     _onTick = () {
       final double p = _progress.value;
       final double lat = startLat + (targetLat - startLat) * p;
       final double lng = startLng + (targetLng - startLng) * p;
-      mapModel.setPosition(mapModel.lastPosition!.moveTo(lat, lng).scaleAround(null, 1 + p));
+      final double scale = startFraction + (2 * endFraction - startFraction) * p;
+      mapModel.setPosition(mapModel.lastPosition!.moveTo(lat, lng).scaleAround(null, scale));
     };
-    _onComplete = () => mapModel.zoomToAround(targetLat, targetLng, targetZoom);
+    _onComplete = () {
+      mapModel.zoomToAround(targetLat, targetLng, targetZoom);
+      if (endFraction > 1.001) mapModel.scaleAround(null, endFraction);
+    };
     unawaited(_controller.forward(from: 0));
   }
 
@@ -79,11 +89,14 @@ class ZoomAnimator {
     _finishActive();
     final MapPosition? start = mapModel.lastPosition;
     if (start == null || start.zoomlevel <= mapModel.zoomlevelRange.zoomlevelMin) return;
-    mapModel.setPosition(start.zoomOut().scaleAround(null, 2));
+    // Carry a settled fractional zoom (scale in [1,2)) across the level
+    // change: (z-1, 2*s) is pixel-identical to (z, s), then ease back to s.
+    final double fraction = start.scale > 0 ? start.scale : 1;
+    mapModel.setPosition(start.zoomOut().scaleAround(null, 2 * fraction));
     _onTick = () {
-      mapModel.scaleAround(null, 2 - _progress.value);
+      mapModel.scaleAround(null, fraction * (2 - _progress.value));
     };
-    _onComplete = () => mapModel.zoomTo(mapModel.lastPosition!.zoomlevel);
+    _onComplete = () => mapModel.scaleAround(null, fraction);
     unawaited(_controller.forward(from: 0));
   }
 

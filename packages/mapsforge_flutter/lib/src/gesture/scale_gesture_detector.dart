@@ -21,76 +21,12 @@ class ScaleGestureDetector extends StatefulWidget {
 
 //////////////////////////////////////////////////////////////////////////////
 
-class _ScaleGestureDetectorState extends State<ScaleGestureDetector> with SingleTickerProviderStateMixin {
+class _ScaleGestureDetectorState extends State<ScaleGestureDetector> {
   static final _log = Logger('_Scale2GestureDetectorState');
 
   final bool doLog = false;
 
   _Handler? _handler;
-
-  late final AnimationController _snapController = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 150),
-  );
-  late final Animation<double> _snapProgress = CurvedAnimation(
-    parent: _snapController,
-    curve: Curves.easeOut,
-  );
-
-  // State for the current snap animation
-  double _snapFrom = 1.0;
-  double _snapTo = 1.0;
-  Offset _snapFocalPoint = Offset.zero;
-  VoidCallback? _snapCommit;
-
-  @override
-  void initState() {
-    super.initState();
-    _snapProgress.addListener(_onSnapTick);
-    _snapController.addStatusListener(_onSnapStatus);
-  }
-
-  @override
-  void dispose() {
-    _snapController.dispose();
-    super.dispose();
-  }
-
-  void _onSnapTick() {
-    final scale = _snapFrom + (_snapTo - _snapFrom) * _snapProgress.value;
-    widget.mapModel.scaleAround(_snapFocalPoint, scale);
-  }
-
-  void _onSnapStatus(AnimationStatus status) {
-    if (status != AnimationStatus.completed) return;
-    final commit = _snapCommit;
-    _snapCommit = null;
-    commit?.call();
-  }
-
-  void _animateSnapAndCommit({
-    required double fromScale,
-    required double toScale,
-    required Offset focalPoint,
-    required VoidCallback commit,
-  }) {
-    _snapFrom = fromScale;
-    _snapTo = toScale;
-    _snapFocalPoint = focalPoint;
-    _snapCommit = commit;
-    _snapController.forward(from: 0.0);
-  }
-
-  /// Finishes a still-running release snap INSTANTLY (committing its pending
-  /// zoom) so a new two-finger gesture starts from a settled state. Without
-  /// this the snap's ticker kept fighting the new gesture's scaleAround and
-  /// its deferred commit fired mid-gesture on top of the new gesture's zoom.
-  void _finishSnap() {
-    if (_snapController.isAnimating) _snapController.stop();
-    final commit = _snapCommit;
-    _snapCommit = null;
-    commit?.call();
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -105,8 +41,6 @@ class _ScaleGestureDetectorState extends State<ScaleGestureDetector> with Single
               size: constraints.biggest,
               lastPosition: widget.mapModel.lastPosition!,
               mapModel: widget.mapModel,
-              animateSnap: _animateSnapAndCommit,
-              finishSnap: _finishSnap,
             );
             // localPosition, NOT position: the focal point feeds normalize()
             // and the transform origin, which both work in this widget's own
@@ -161,16 +95,6 @@ class _Handler {
 
   DateTime _lastCommitAt = DateTime.fromMillisecondsSinceEpoch(0);
 
-  final void Function({
-    required double fromScale,
-    required double toScale,
-    required Offset focalPoint,
-    required VoidCallback commit,
-  }) animateSnap;
-
-  /// Instantly completes a pending release-snap (see state._finishSnap).
-  final VoidCallback finishSnap;
-
   final Map<int, Offset> _points = {};
 
   _Vector? _startVector;
@@ -183,8 +107,6 @@ class _Handler {
     required this.lastPosition,
     required this.mapModel,
     required this.size,
-    required this.animateSnap,
-    required this.finishSnap,
   });
 
   void _addOffset(int id, Offset offset) {
@@ -196,14 +118,16 @@ class _Handler {
     // slow "ratchets" (spread, lift one finger, replant, spread again):
     // carrying the committed factor / reference position over from the
     // previous contact made every replant fire spurious commits from stale
-    // state and run the zoom away. Settle any pending release-snap first,
-    // then re-baseline everything.
-    finishSnap();
+    // state and run the zoom away.
     _startVector = _Vector(_points.values.first, _points.values.last);
     _lastVector = null;
     lastPosition = mapModel.lastPosition!;
-    _committedFactor = 1;
-    _lastScale = 1;
+    // The map may be SETTLED at a fractional zoom (scale in [1,2) — see
+    // _sendEnd). The displayed scale must start the gesture from there, not
+    // from 1, or the first move event would visibly snap the fraction away.
+    final double settled = lastPosition.scale > 0 ? lastPosition.scale : 1;
+    _committedFactor = 1 / settled;
+    _lastScale = settled;
   }
 
   bool _removeOffset(int id) {
@@ -294,44 +218,54 @@ class _Handler {
   }
 
   void _sendEnd() {
-    // no zoom: 0, double zoom: 1, half zoom: -1
-    double zoomLevelOffset = log(_lastScale) / log(2);
-    int zoomLevelDiff = zoomLevelOffset.round();
-    // Same clamp as _commitZoomStep: never recentre for zoom levels the
-    // model's bounds won't actually apply.
+    // Settle at the FRACTIONAL zoom where the fingers left the map (like
+    // Google Maps / Locus): commit whole levels via floor() and keep the
+    // residual scale in [1,2) as the new settled state. The old behaviour
+    // rounded to the NEAREST whole level, so a small pinch rounded to zero
+    // and visibly snapped back — discarding the user's gesture, the top
+    // complaint about the zoom feel.
+    int zoomLevelDiff = (log(_lastScale) / log(2)).floor();
+    // Never recentre for zoom levels the model's bounds won't actually apply.
     final int beforeZoom = mapModel.lastPosition!.zoomlevel;
     zoomLevelDiff = mapModel.zoomlevelRange.ensureBounds(beforeZoom + zoomLevelDiff) - beforeZoom;
+    double residual = _lastScale / pow(2, zoomLevelDiff);
+    if (residual < 1) residual = 1;
 
     // Fall back to screen centre if we never got a move event with 2 fingers
     final focalPoint = _lastVector?.getFocalPoint() ?? Offset(size.width / 2, size.height / 2);
 
-    if (zoomLevelDiff != 0) {
-      num mult = pow(2, zoomLevelDiff);
-      double targetScale = pow(2, zoomLevelDiff).toDouble();
-      PositionInfo positionInfo = RotateHelper.normalize(lastPosition, size, focalPoint.dx, focalPoint.dy);
+    if (zoomLevelDiff == 0 && (residual - mapModel.lastPosition!.scale).abs() < 0.005) {
+      // Nothing changed (e.g. a two-finger tap) — do not nudge the map.
+      return;
+    }
 
-      animateSnap(
-        fromScale: _lastScale,
-        toScale: targetScale,
-        focalPoint: focalPoint,
-        commit: () {
-          mapModel.zoomToAround(
-            positionInfo.latitude + (mapModel.lastPosition!.latitude - positionInfo.latitude) / mult,
-            positionInfo.longitude + (mapModel.lastPosition!.longitude - positionInfo.longitude) / mult,
-            mapModel.lastPosition!.zoomlevel + zoomLevelDiff,
-          );
-        },
+    if (zoomLevelDiff != 0) {
+      final num mult = pow(2, zoomLevelDiff);
+      final PositionInfo positionInfo = RotateHelper.normalize(lastPosition, size, focalPoint.dx, focalPoint.dy);
+      mapModel.zoomToAround(
+        positionInfo.latitude + (mapModel.lastPosition!.latitude - positionInfo.latitude) / mult,
+        positionInfo.longitude + (mapModel.lastPosition!.longitude - positionInfo.longitude) / mult,
+        beforeZoom + zoomLevelDiff,
       );
-    } else if (_lastScale != 1) {
-      // No significant zoom — animate back to original scale then restore zoom level
-      animateSnap(
-        fromScale: _lastScale,
-        toScale: 1.0,
-        focalPoint: focalPoint,
-        commit: () {
-          mapModel.zoomTo(mapModel.lastPosition!.zoomlevel);
-        },
+    }
+
+    // Persist the residual as a CENTRE-anchored settled scale: the composite
+    // "integer commit + residual around the last focal" is pixel-identical to
+    // what was displayed at release, and re-anchoring it to the centre keeps
+    // gesture artifacts (the focal point) out of the settled position.
+    final MapPosition committed = mapModel.lastPosition!;
+    if (residual > 1.001) {
+      final PositionInfo f = RotateHelper.normalize(committed, size, focalPoint.dx, focalPoint.dy);
+      mapModel.setPosition(
+        committed
+            .moveTo(
+              f.latitude + (committed.latitude - f.latitude) / residual,
+              f.longitude + (committed.longitude - f.longitude) / residual,
+            )
+            .scaleAround(null, residual),
       );
+    } else if ((committed.scale - 1).abs() > 0.001) {
+      mapModel.scaleAround(null, 1);
     }
   }
 }
