@@ -14,6 +14,20 @@ class TileHelper {
     Mappoint center = mapViewPosition.getCenter();
     double halfWidth = screensize.width / 2;
     double halfHeight = screensize.height / 2;
+    // The tile layer is displayed magnified by mapViewPosition.scale
+    // (TransformWidget's Transform.scale). When the map rests at — or animates
+    // through — an UPSCALE (scale > 1: the persisted fractional zoom, and the
+    // ~2x→1x zoom-out glide), only `viewport / scale` worth of map is actually
+    // on screen, so fetching the full unscaled viewport holds several times
+    // more tiles than are visible. That surplus, right where the low-zoom tile
+    // cache is already at its ceiling, is what tipped zooming into a freeze.
+    // Shrink the fetched extent to what's visible (scale capped at 4x so the
+    // fetch never drops below a quarter viewport). Downscale (scale < 1, a
+    // transient pinch-out) is left untouched — growing the fetch there would
+    // add memory on the same fragile path.
+    final double upscale = mapViewPosition.scale > 1.0 ? min(mapViewPosition.scale, 4.0) : 1.0;
+    halfWidth = halfWidth / upscale;
+    halfHeight = halfHeight / upscale;
     // In case of rotation use the max side for both width and height
     halfWidth = max(halfWidth, halfHeight);
     halfHeight = halfWidth;
