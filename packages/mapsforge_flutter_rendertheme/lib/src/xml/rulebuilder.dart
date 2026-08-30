@@ -346,8 +346,13 @@ class RuleBuilder {
       caption.parse(rootElement);
       if (isVisible(caption)) {
         if (element != Element.WAY) addRenderingInstructionNode(caption);
+        // A <caption> must also apply to OPEN ways (mapsforge renders it at the
+        // way's labelPosition/centre). This was omitted — only nodes and closed
+        // ways got captions — so an open way carrying a name (e.g. a
+        // place=locality, the BGMountains convention for meadows/fields like
+        // "Станкови ниви") never showed a label. Mirror line/lineSymbol.
+        if (closed != Closed.YES) addRenderingInstructionOpenWay(caption);
         if (closed != Closed.NO) addRenderingInstructionClosedWay(caption);
-        //        maxLevel = max(maxLevel, level);
       }
     } else if ("cat" == qName) {
       checkState(qName, XmlElementType.RENDERING_STYLE);

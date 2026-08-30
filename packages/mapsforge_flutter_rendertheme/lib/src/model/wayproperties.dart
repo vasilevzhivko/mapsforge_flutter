@@ -80,10 +80,16 @@ class WayProperties implements NodeWayProperties {
   Mappoint getCenterAbsolute(PixelProjection projection) {
     if (center != null) return center!;
 
+    // Honor the datastore-provided label position (e.g. a place=locality's own
+    // centre point) when present; otherwise fall back to the way's bounding-box
+    // centre. The old code computed the label-position pixel but then returned
+    // the bbox centre anyway, so labelPosition was always ignored.
     if (way.labelPosition != null) {
       center = projection.latLonToPixel(way.labelPosition!);
+    } else {
+      center = getBoundaryAbsolute().getCenter();
     }
-    return _boundaryAbsolute!.getCenter();
+    return center!;
   }
 
   int getLayer() {
