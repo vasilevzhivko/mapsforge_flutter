@@ -81,6 +81,13 @@ abstract class Renderer {
   /// the theme's color instead of holes showing the app background.
   int? get backgroundColor => null;
 
+  /// Identity for the persistent disk tile cache, or null to opt out (the
+  /// default — e.g. online sources have their own caching semantics and
+  /// overlays are cheap to render). MUST be stable across app sessions (never
+  /// derived from Object.hashCode) and MUST change whenever this renderer
+  /// would produce different pixels for the same tile.
+  String? get diskCacheKey => null;
+
   /// Whether the tile queue should speculatively render zoom±1 tiles into this
   /// renderer's cache after the current zoom is filled. Great for a base map
   /// (instant zoom), but a lightweight overlay with a small cache should opt out

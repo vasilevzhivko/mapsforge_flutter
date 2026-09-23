@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'package:flutter/cupertino.dart';
 import 'package:logging/logging.dart';
 import 'package:mapsforge_flutter/mapsforge.dart';
+import 'package:mapsforge_flutter/src/cache/disk_tile_cache.dart';
 import 'package:mapsforge_flutter/src/tile/tile_dimension.dart';
 import 'package:mapsforge_flutter/src/tile/tile_set.dart';
 import 'package:mapsforge_flutter/src/util/tile_helper.dart';
@@ -457,6 +458,16 @@ class TileJobQueue extends ChangeNotifier {
     if (myJob._abort) return;
     TilePicture? picture = await _cache.getOrProduce(tile, (Tile tile) async {
       try {
+        // Persistent disk cache first: a previously rendered tile loads in a
+        // few ms (decode off the UI thread) instead of a full vector render.
+        final String? diskKey = renderer.diskCacheKey;
+        if (diskKey != null) {
+          final TilePicture? fromDisk = await DiskTileCache().read(diskKey, tile);
+          if (fromDisk != null) {
+            TileImageStats.add(fromDisk.imageWidth, fromDisk.imageHeight);
+            return fromDisk;
+          }
+        }
         JobResult result = await renderer.executeJob(JobRequest(tile));
         if (result.picture == null) {
           // No render output for this tile → it draws as a NoData/transparent
@@ -477,6 +488,9 @@ class TileJobQueue extends ChangeNotifier {
         // make sure the picture is converted to an image because rendering (vector) pictures is usually slower than drawing images
         result.picture!.rasterize();
         TileImageStats.add(result.picture!.imageWidth, result.picture!.imageHeight);
+        if (diskKey != null) {
+          unawaited(DiskTileCache().write(diskKey, tile, result.picture!));
+        }
         return result.picture!;
       } catch (error, stacktrace) {
         // error in ecache abort() method. The completer should be checked for isComplete() before injecting an exception
@@ -557,13 +571,22 @@ class TileJobQueue extends ChangeNotifier {
       final TilePicture? produced = await _cache.getOrProduce(tile, (Tile t) async {
         if (_prefetchVersion != version) return null;
         TilePicture picture;
+        final String? diskKey = renderer.diskCacheKey;
         try {
-          final JobResult result = await renderer.executeJob(JobRequest(t));
-          if (result.picture == null) {
-            picture = await (renderer.transparentOnMiss ? ImageHelper().createTransparentBitmap() : ImageHelper().createNoDataBitmap());
+          final TilePicture? fromDisk = diskKey == null ? null : await DiskTileCache().read(diskKey, t);
+          if (fromDisk != null) {
+            picture = fromDisk;
           } else {
-            result.picture!.rasterize();
-            picture = result.picture!;
+            final JobResult result = await renderer.executeJob(JobRequest(t));
+            if (result.picture == null) {
+              picture = await (renderer.transparentOnMiss ? ImageHelper().createTransparentBitmap() : ImageHelper().createNoDataBitmap());
+            } else {
+              result.picture!.rasterize();
+              picture = result.picture!;
+              if (diskKey != null) {
+                unawaited(DiskTileCache().write(diskKey, t, picture));
+              }
+            }
           }
         } catch (e, st) {
           _log.warning('prefetch tile render failed for $t', e, st);

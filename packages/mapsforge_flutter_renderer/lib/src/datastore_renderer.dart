@@ -94,6 +94,9 @@ class IsolateDatastoreRenderer implements Renderer {
   int? get backgroundColor => null;
 
   @override
+  String? get diskCacheKey => null;
+
+  @override
   bool get fadeInTiles => false;
 
   @override
@@ -334,4 +337,13 @@ class DatastoreRenderer extends Renderer {
 
   @override
   int? get backgroundColor => rendertheme.getMapBackground();
+
+  /// Session-stable disk-cache identity. forHash covers the scale factors and
+  /// tile size; maxLevels + rule count disambiguate different THEMES (e.g.
+  /// the main Elevate theme vs a generated Garmin theme), which forHash alone
+  /// does not. Content-level theme/map/exclusion changes are the app's part:
+  /// it folds them into DiskTileCache.init's version.
+  @override
+  String? get diskCacheKey =>
+      'ds${useSeparateLabelLayer ? 1 : 0}-${rendertheme.forHash}-${rendertheme.maxLevels}-${rendertheme.rulesList.length}';
 }
