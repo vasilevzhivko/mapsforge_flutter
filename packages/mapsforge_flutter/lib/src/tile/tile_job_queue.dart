@@ -62,8 +62,10 @@ class TileJobQueue extends ChangeNotifier {
   /// Parallel task queue for tile loading optimization
   late final TaskQueue _taskQueue;
 
-  /// More concurrent workers = tiles appear faster after a zoom change.
-  static const int _maxConcurrentTiles = 10;
+  /// More concurrent workers = tiles appear faster after a zoom change, but
+  /// on weak devices they compete with the UI thread for cores — configured
+  /// via [MapsforgeSettingsMgr.tileConcurrency].
+  static int get _maxConcurrentTiles => MapsforgeSettingsMgr().tileConcurrency.clamp(1, 16);
 
   /// Pictures no longer owned by the cache (evicted while still displayed, or
   /// never cached at all like per-tileSet miss bitmaps). They stay alive while

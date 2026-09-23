@@ -56,6 +56,11 @@ class LabelJobQueue extends ChangeNotifier {
 
   LabelSet get labelSet => _currentJob!.labelSet;
 
+  /// The map-pixel anchor the current labels were painted against, or null
+  /// before the first job. [LabelView] translates the cached label raster by
+  /// (anchor - currentCenter) during pans instead of repainting it.
+  Mappoint? get currentLabelCenter => _currentJob?.labelSet.center;
+
   void setPosition(MapPosition position) {
     if (_currentJob?.labelSet.mapPosition == position) {
       return;
@@ -69,6 +74,26 @@ class LabelJobQueue extends ChangeNotifier {
       _CurrentJob myJob = _CurrentJob(_currentJob!.tileDimension, labelSet);
       _currentJob = myJob;
       _emitLabelSetBatched(_currentJob!.labelSet);
+      return;
+    }
+    final LabelSet? current = _currentJob?.labelSet;
+    if (current != null &&
+        current.mapPosition.zoomlevel == position.zoomlevel &&
+        current.mapPosition.indoorLevel == position.indoorLevel &&
+        current.mapPosition.rotation == position.rotation &&
+        current.mapPosition.scale == position.scale) {
+      // Translation-only pan: the labels' rendered appearance is unchanged —
+      // LabelView translates the cached raster, so repainting hundreds of
+      // paragraphs per pan frame (the label layer's whole cost in city areas)
+      // is skipped entirely. Only recompute once the viewport reaches label
+      // blocks that were not part of the current job's coverage.
+      TileDimension tileDimension = TileHelper.calculateTiles(mapViewPosition: position, screensize: _size!);
+      if (_currentJob!.tileDimension.contains(tileDimension)) {
+        return; // fully covered — no repaint, no recompute
+      }
+      _taskQueue.clear();
+      _currentJob?.abort();
+      unawaited(_positionEvent(position, tileDimension));
       return;
     }
     TileDimension tileDimension = TileHelper.calculateTiles(mapViewPosition: position, screensize: _size!);

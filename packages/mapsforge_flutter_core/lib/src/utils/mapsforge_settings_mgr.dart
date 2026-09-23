@@ -103,6 +103,13 @@ class MapsforgeSettingsMgr {
   /// [setMemoryProfile] or directly, BEFORE creating the map widget.
   int tileBitmapBudgetBytes = 64 << 20;
 
+  /// How many tiles each layer renders concurrently. 10 keeps a modern
+  /// phone's pipeline full; on weak devices (few cores / low RAM) that many
+  /// parallel renders compete with the UI thread for cores and read as pan
+  /// jank — set a lower value (e.g. 4) at startup, BEFORE creating the map
+  /// widget.
+  int tileConcurrency = 10;
+
   /// Applies the cache budgets of [profile]. Call at app startup, before any
   /// mapfile or map widget is created.
   void setMemoryProfile(MemoryProfile profile) {

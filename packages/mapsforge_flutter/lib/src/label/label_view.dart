@@ -3,6 +3,7 @@ import 'package:mapsforge_flutter/mapsforge.dart';
 import 'package:mapsforge_flutter/src/label/label_job_queue.dart';
 import 'package:mapsforge_flutter/src/label/label_painter.dart';
 import 'package:mapsforge_flutter/src/transform_widget.dart';
+import 'package:mapsforge_flutter_core/model.dart';
 import 'package:mapsforge_flutter_core/utils.dart';
 import 'package:mapsforge_flutter_renderer/offline_renderer.dart';
 
@@ -53,9 +54,12 @@ class _LabelViewState extends State<LabelView> {
         final double scale = MapsforgeSettingsMgr().getDeviceScaleFactor();
 
         jobQueue.setSize(constraints.maxWidth * scale, constraints.maxHeight * scale);
-        // use notifier instead of stream because it should be faster
+        // use notifier instead of stream because it should be faster.
+        // Also listen to the jobQueue: when new labels arrive without a
+        // position change, the translation below must be recomputed for the
+        // freshly anchored raster.
         return ListenableBuilder(
-          listenable: widget.mapModel,
+          listenable: Listenable.merge([widget.mapModel, jobQueue]),
           builder: (BuildContext context, Widget? child) {
             MapPosition? position = widget.mapModel.lastPosition;
             if (position == null) {
@@ -65,14 +69,29 @@ class _LabelViewState extends State<LabelView> {
               return const SizedBox();
             }
             jobQueue.setPosition(position);
+            // Pan = translate the CACHED label raster (see the RepaintBoundary
+            // below) by the delta between the anchor the labels were painted
+            // against and the current center — instead of repainting hundreds
+            // of paragraphs per frame, the label layer's dominant cost in
+            // dense city areas. The painter only repaints when the content,
+            // rotation or pinch scale actually changes.
+            Widget content = child!;
+            final Mappoint? anchor = jobQueue.currentLabelCenter;
+            if (anchor != null) {
+              final Mappoint current = position.getCenter();
+              final double dx = anchor.x - current.x, dy = anchor.y - current.y;
+              if (dx != 0 || dy != 0) {
+                content = Transform.translate(offset: Offset(dx, dy), child: content);
+              }
+            }
             return TransformWidget(
               mapCenter: position.getCenter(),
               mapPosition: position,
               screensize: Size(constraints.maxWidth, constraints.maxHeight),
-              child: child!,
+              child: content,
             );
           },
-          child: CustomPaint(foregroundPainter: LabelPainter(jobQueue), child: const SizedBox.expand()),
+          child: RepaintBoundary(child: CustomPaint(foregroundPainter: LabelPainter(jobQueue), child: const SizedBox.expand())),
         );
       },
     );
