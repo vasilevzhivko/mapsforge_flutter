@@ -104,4 +104,11 @@ abstract class Renderer {
 
   /// Duration of the [fadeInTiles] ramp.
   Duration get tileFadeInDuration => const Duration(milliseconds: 200);
+
+  /// Cross-fade for each INDIVIDUAL tile the first time it appears (over the
+  /// zoom underlay / background), instead of popping in within one frame —
+  /// the single biggest contributor to a "liquid" Google-Maps-like feel while
+  /// tiles load. [Duration.zero] disables it. Distinct from [fadeInTiles],
+  /// which ramps the whole layer once.
+  Duration get tileCrossFadeDuration => const Duration(milliseconds: 150);
 }

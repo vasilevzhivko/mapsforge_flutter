@@ -74,6 +74,25 @@ class TileJobQueue extends ChangeNotifier {
   /// [_sweepZombies] as soon as no tileSet does.
   final Set<TilePicture> _zombies = {};
 
+  /// First-publication time per picture, driving the per-tile cross-fade
+  /// (see [fadeOpacityFor]). Identity-keyed; entries are pruned once fully
+  /// faded and removed on dispose, so it only ever holds "young" pictures
+  /// plus the currently live ones.
+  final Map<TilePicture, DateTime> _publishedAt = Map.identity();
+
+  /// Drives repaints (~60Hz) only while any tile is still fading in.
+  Timer? _fadeTicker;
+
+  /// Publication throttle: completed tiles (renders AND near-instant disk
+  /// hits) enter the displayed tileSet at most a few per frame, so their
+  /// first-draw texture uploads spread across frames instead of landing in
+  /// one 17-27ms raster spike. The cross-fade makes the stagger invisible.
+  DateTime _publishWindowStart = DateTime.fromMillisecondsSinceEpoch(0);
+
+  int _publishedInWindow = 0;
+
+  static const int _maxPublishPerFrame = 3;
+
   /// All live tile job queues across every map view and layer. Each cache only
   /// bounds its own share, so stacked overlays and background map views would
   /// otherwise multiply the global budget — [_enforceGlobalTileBudget] evicts
@@ -132,8 +151,77 @@ class TileJobQueue extends ChangeNotifier {
 
   /// Disposes [picture] and updates the live-bitmap accounting.
   void _disposePicture(TilePicture picture) {
+    _publishedAt.remove(picture);
     TileImageStats.remove(picture.imageWidth, picture.imageHeight);
     picture.dispose();
+  }
+
+  /// Records the FIRST time [picture] becomes visible (later publications of
+  /// the same picture keep the original time, so carried-forward or re-shown
+  /// tiles do not fade again), and keeps a ~60Hz repaint ticker alive while
+  /// any fade is in progress.
+  void _markPublished(TilePicture picture) {
+    final Duration duration = renderer.tileCrossFadeDuration;
+    if (duration == Duration.zero) return;
+    bool inserted = false;
+    _publishedAt.putIfAbsent(picture, () {
+      inserted = true;
+      return DateTime.now();
+    });
+    // Already-seen picture (carry-forward, pan cache hit): nothing new fades.
+    if (!inserted) return;
+    _fadeTicker ??= Timer.periodic(const Duration(milliseconds: 16), (_) {
+      if (!_pruneFades()) {
+        _fadeTicker?.cancel();
+        _fadeTicker = null;
+        // Fades are over — the underlay (kept beneath translucent tiles so
+        // nothing flashes through) can now be released if the set is done.
+        final _CurrentJob? job = _currentJob;
+        if (job != null) _releaseUnderlayIfComplete(job);
+      }
+      notifyListeners();
+    });
+  }
+
+  /// Drops fully-faded entries; returns true while any fade is still active.
+  bool _pruneFades() {
+    final Duration duration = renderer.tileCrossFadeDuration;
+    final DateTime now = DateTime.now();
+    _publishedAt.removeWhere((_, DateTime born) => now.difference(born) >= duration);
+    return _publishedAt.isNotEmpty;
+  }
+
+  /// Whether any tile is still fading in.
+  bool get _hasActiveFades => _fadeTicker != null;
+
+  /// The cross-fade opacity (0..1) for [picture]: ramps linearly over
+  /// [Renderer.tileCrossFadeDuration] from its first publication; 1 for
+  /// anything without a (young) publication record.
+  double fadeOpacityFor(TilePicture picture) {
+    final DateTime? born = _publishedAt[picture];
+    if (born == null) return 1;
+    final int total = renderer.tileCrossFadeDuration.inMilliseconds;
+    if (total <= 0) return 1;
+    final int elapsed = DateTime.now().difference(born).inMilliseconds;
+    if (elapsed >= total) return 1;
+    return elapsed / total;
+  }
+
+  /// Waits until this frame's publication budget allows another tile in
+  /// (see [_maxPublishPerFrame]).
+  Future<void> _publishGate() async {
+    while (true) {
+      final DateTime now = DateTime.now();
+      if (now.difference(_publishWindowStart) >= const Duration(milliseconds: 16)) {
+        _publishWindowStart = now;
+        _publishedInWindow = 0;
+      }
+      if (_publishedInWindow < _maxPublishPerFrame) {
+        _publishedInWindow++;
+        return;
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 8));
+    }
   }
 
   /// Drops every cached tile bitmap across ALL live map views and layers —
@@ -315,6 +403,10 @@ class TileJobQueue extends ChangeNotifier {
   void _releaseUnderlayIfComplete(_CurrentJob job) {
     if (_currentJob != job) return;
     if (job.tileSet.images.length < job._expectedTiles) return;
+    // While tiles are still cross-fading, the underlay must stay beneath
+    // them — releasing it now would flash the background through the
+    // translucent tiles. The fade ticker re-invokes this when fades end.
+    if (_hasActiveFades) return;
     _previousJob = null;
     _sweepZombies();
   }
@@ -323,6 +415,9 @@ class TileJobQueue extends ChangeNotifier {
   void dispose() {
     super.dispose();
     _instances.remove(this);
+    _fadeTicker?.cancel();
+    _fadeTicker = null;
+    _publishedAt.clear();
     _renderChangedSubscription.cancel();
     _taskQueue.cancel();
     _currentJob?.abort();
@@ -402,6 +497,9 @@ class TileJobQueue extends ChangeNotifier {
       try {
         TilePicture? picture = _cache.get(tile);
         if (picture != null) {
+          // First-ever display (e.g. a prefetched tile) starts a cross-fade;
+          // _markPublished keeps the original time for anything already seen.
+          _markPublished(picture);
           tileSet.images[tile] = picture;
         } else if (displayed.containsKey(tile)) {
           // Still-valid on-screen tile the cache has evicted — keep showing it.
@@ -499,11 +597,17 @@ class TileJobQueue extends ChangeNotifier {
       }
     });
     if (myJob._abort) return;
+    // Spread publications across frames (a few per frame): after a zoom the
+    // near-instant disk hits would otherwise land dozens of first-draw
+    // texture uploads in one frame — the residual raster-thread jank spikes.
+    await _publishGate();
+    if (myJob._abort) return;
     if (picture != null) {
       // If the cache refused ownership (oversized entry) the picture would
       // otherwise never be disposed — track it as a zombie. Idempotent for
       // pictures the cache evicted into the zombie list already.
       if (!_cache.containsKey(tile)) _zombies.add(picture);
+      _markPublished(picture);
       tileSet.images[tile] = picture;
       _enforceGlobalTileBudget();
       //print("Added picture for tile $tile for renderer ${renderer.getRenderKey()}");
@@ -513,6 +617,7 @@ class TileJobQueue extends ChangeNotifier {
       // Never cache-owned — register as zombie so the sweep disposes it once
       // this tileSet leaves the screen.
       _zombies.add(miss);
+      _markPublished(miss);
       tileSet.images[tile] = miss;
     }
     // If this job was waiting (pending), promote it now that we have a tile —

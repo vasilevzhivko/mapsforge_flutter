@@ -69,7 +69,10 @@ class TilePainter extends CustomPainter {
     tileSet.images.forEach((Tile tile, TilePicture picture) {
       Mappoint leftUpper = tile.getLeftUpper();
       try {
-        uiCanvas.drawTilePicture(picture: picture, left: leftUpper.x - center.x, top: leftUpper.y - center.y, opacity: opacity);
+        // Per-tile cross-fade: freshly published tiles ramp in over the
+        // underlay/background instead of popping in within one frame.
+        final double fade = jobQueue.fadeOpacityFor(picture);
+        uiCanvas.drawTilePicture(picture: picture, left: leftUpper.x - center.x, top: leftUpper.y - center.y, opacity: opacity * fade);
       } catch (error, stacktrace) {
         print(error);
         print(stacktrace);

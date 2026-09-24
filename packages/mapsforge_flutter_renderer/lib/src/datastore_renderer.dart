@@ -101,6 +101,9 @@ class IsolateDatastoreRenderer implements Renderer {
 
   @override
   Duration get tileFadeInDuration => const Duration(milliseconds: 200);
+
+  @override
+  Duration get tileCrossFadeDuration => const Duration(milliseconds: 150);
 }
 
 //////////////////////////////////////////////////////////////////////////////
