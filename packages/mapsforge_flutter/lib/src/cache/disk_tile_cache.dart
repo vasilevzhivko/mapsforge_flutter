@@ -207,6 +207,17 @@ class DiskTileCache {
     }
   }
 
+  /// Turns the cache off for this session: reads and writes become no-ops
+  /// until the next [init]. With [deleteStored], the current version's
+  /// stored tiles are removed first — a user turning the feature off
+  /// usually wants the disk space back.
+  Future<void> disable({bool deleteStored = false}) async {
+    if (deleteStored) await clear();
+    _dir = null;
+    _approxBytes = 0;
+    _scanDone = null;
+  }
+
   /// Deletes every cached tile of the current version (a "clear map cache"
   /// button). The cache stays enabled.
   Future<void> clear() async {
