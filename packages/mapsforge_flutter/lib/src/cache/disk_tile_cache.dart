@@ -49,10 +49,21 @@ class DiskTileCache {
 
   bool _trimming = false;
 
+  Future<void>? _scanDone;
+
   bool get enabled => _dir != null;
 
   /// Rough total of the stored bytes (exact after the init scan / a trim).
+  /// NOTE: right after [init] this is 0 until the background scan finishes —
+  /// use [measuredBytes] for a truthful startup log.
   int get approximateBytes => _approxBytes;
+
+  /// The stored total in bytes, measured — resolves once the init scan has
+  /// actually counted the files.
+  Future<int> get measuredBytes async {
+    await _scanDone;
+    return _approxBytes;
+  }
 
   /// Enables the cache.
   ///
@@ -79,7 +90,8 @@ class DiskTileCache {
       return;
     }
     _dir = namespaceDir;
-    unawaited(_initScan(directory, namespace));
+    _scanDone = _initScan(directory, namespace);
+    unawaited(_scanDone);
   }
 
   /// Deletes stale version namespaces and measures the current one.
