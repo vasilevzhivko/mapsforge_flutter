@@ -8,10 +8,22 @@ class TagCollection implements ITagCollection {
 
   final int _hashCode;
 
-  /// Creates a new `TagCollection`.
-  TagCollection({required List<Tag> tags}) : _tags = tags, _hashCode = _calculateHashCode(tags);
+  /// Tag keys/values as hash sets. Rule matching probes every way/POI against
+  /// hundreds of theme rules per tile; with list scans that was
+  /// O(rules × tags × matcher entries) of string comparisons and dominated the
+  /// tile-render CPU profile. Built once per collection instead.
+  final Set<String> _keySet;
 
-  const TagCollection.empty() : _tags = const [], _hashCode = 0;
+  final Set<String> _valueSet;
+
+  /// Creates a new `TagCollection`.
+  TagCollection({required List<Tag> tags})
+    : _tags = tags,
+      _hashCode = _calculateHashCode(tags),
+      _keySet = {for (final tag in tags) tag.key},
+      _valueSet = {for (final tag in tags) tag.value};
+
+  const TagCollection.empty() : _tags = const [], _hashCode = 0, _keySet = const {}, _valueSet = const {};
 
   /// Creates a list of `Tag` objects from a map of key-value pairs.
   static TagCollection from(Map<String, String> tags) {
@@ -48,7 +60,7 @@ class TagCollection implements ITagCollection {
 
   /// Returns true if this POI has a tag with the given [key].
   bool hasTag(String key) {
-    return _tags.firstWhereOrNull((test) => test.key == key) != null;
+    return _keySet.contains(key);
   }
 
   /// Returns true if this POI has a tag with the given [key] and [value].
@@ -64,14 +76,20 @@ class TagCollection implements ITagCollection {
 
   @override
   bool matchesTagList(List<String> keys) {
-    Tag? tag = _tags.firstWhereOrNull((element) => keys.contains(element.key));
-    return tag != null;
+    if (keys.length == 1) return _keySet.contains(keys[0]);
+    for (int i = 0; i < keys.length; i++) {
+      if (_keySet.contains(keys[i])) return true;
+    }
+    return false;
   }
 
   @override
   bool valueMatchesTagList(List<String> values) {
-    Tag? tag = _tags.firstWhereOrNull((element) => values.contains(element.value));
-    return tag != null;
+    if (values.length == 1) return _valueSet.contains(values[0]);
+    for (int i = 0; i < values.length; i++) {
+      if (_valueSet.contains(values[i])) return true;
+    }
+    return false;
   }
 
   bool get isEmpty => _tags.isEmpty;

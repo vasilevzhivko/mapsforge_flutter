@@ -66,7 +66,8 @@ class NegativeRule extends Rule {
 
   @override
   bool matches(TagCollection tags, int indoorLevel) {
-    return IndoorNotationMatcher.isOutdoorOrMatchesIndoorLevel(tags, indoorLevel) && attributeMatcher.matchesTagList(tags);
+    // Cheap tag check first; the indoor-level lookup only for matching rules.
+    return attributeMatcher.matchesTagList(tags) && IndoorNotationMatcher.isOutdoorOrMatchesIndoorLevel(tags, indoorLevel);
   }
 
   @override

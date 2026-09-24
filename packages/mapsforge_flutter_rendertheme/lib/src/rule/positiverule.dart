@@ -69,7 +69,10 @@ class PositiveRule extends Rule {
 
   @override
   bool matches(TagCollection tags, int indoorLevel) {
-    return IndoorNotationMatcher.isOutdoorOrMatchesIndoorLevel(tags, indoorLevel) && keyMatcher.matchesTagList(tags) && valueMatcher.matchesTagList(tags);
+    // Key/value checks first: they are cheap set probes and reject almost every
+    // rule, so the (Expando-backed, per-rule-invocation) indoor-level lookup
+    // only runs for the few rules that actually match.
+    return keyMatcher.matchesTagList(tags) && valueMatcher.matchesTagList(tags) && IndoorNotationMatcher.isOutdoorOrMatchesIndoorLevel(tags, indoorLevel);
   }
 
   @override
