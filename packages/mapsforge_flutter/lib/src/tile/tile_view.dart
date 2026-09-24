@@ -122,19 +122,31 @@ class _TileViewState extends State<TileView> with SingleTickerProviderStateMixin
   /// The tile painter, wrapped in an [AnimatedBuilder] when this layer fades in
   /// so the painter is rebuilt with the ramped opacity each frame. TilePainter
   /// already repaints on an opacity change, so no extra plumbing is needed.
+  ///
+  /// The painter sits behind a [RepaintBoundary]: [TransformWidget] above it
+  /// updates every gesture frame, and without the boundary each of those
+  /// repaints replayed every visible tile through [TilePainter.paint] (and
+  /// dirtied every ancestor up to the screen root). Behind the boundary the
+  /// engine re-composites the retained layer under the new transform; the
+  /// painter only re-runs when the tile set, a fade tick, or the opacity
+  /// actually changes — same recipe as the label and marker layers.
   Widget _buildPainter() {
     final controller = _fade;
     if (controller == null) {
-      return CustomPaint(
-        foregroundPainter: TilePainter(jobQueue, opacity: widget.opacity),
-        child: const SizedBox.expand(),
+      return RepaintBoundary(
+        child: CustomPaint(
+          foregroundPainter: TilePainter(jobQueue, opacity: widget.opacity),
+          child: const SizedBox.expand(),
+        ),
       );
     }
-    return AnimatedBuilder(
-      animation: controller,
-      builder: (context, _) => CustomPaint(
-        foregroundPainter: TilePainter(jobQueue, opacity: widget.opacity * controller.value),
-        child: const SizedBox.expand(),
+    return RepaintBoundary(
+      child: AnimatedBuilder(
+        animation: controller,
+        builder: (context, _) => CustomPaint(
+          foregroundPainter: TilePainter(jobQueue, opacity: widget.opacity * controller.value),
+          child: const SizedBox.expand(),
+        ),
       ),
     );
   }
