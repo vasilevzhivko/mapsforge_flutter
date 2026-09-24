@@ -75,10 +75,16 @@ class TileJobQueue extends ChangeNotifier {
   final Set<TilePicture> _zombies = {};
 
   /// First-publication time per picture, driving the per-tile cross-fade
-  /// (see [fadeOpacityFor]). Identity-keyed; entries are pruned once fully
-  /// faded and removed on dispose, so it only ever holds "young" pictures
-  /// plus the currently live ones.
+  /// (see [fadeOpacityFor]). Identity-keyed; an entry lives as long as its
+  /// picture (removed in _disposePicture) and is NEVER pruned earlier:
+  /// re-inserting a pruned entry when the same picture reappeared on a later
+  /// pan made already-visible tiles re-fade — visible blinking while moving
+  /// the map.
   final Map<TilePicture, DateTime> _publishedAt = Map.identity();
+
+  /// When the most recent fade started; the ticker runs only while
+  /// now - this < fade duration.
+  DateTime _lastFadeStart = DateTime.fromMillisecondsSinceEpoch(0);
 
   /// Drives repaints (~60Hz) only while any tile is still fading in.
   Timer? _fadeTicker;
@@ -170,8 +176,9 @@ class TileJobQueue extends ChangeNotifier {
     });
     // Already-seen picture (carry-forward, pan cache hit): nothing new fades.
     if (!inserted) return;
+    _lastFadeStart = DateTime.now();
     _fadeTicker ??= Timer.periodic(const Duration(milliseconds: 16), (_) {
-      if (!_pruneFades()) {
+      if (!_hasActiveFades) {
         _fadeTicker?.cancel();
         _fadeTicker = null;
         // Fades are over — the underlay (kept beneath translucent tiles so
@@ -183,16 +190,8 @@ class TileJobQueue extends ChangeNotifier {
     });
   }
 
-  /// Drops fully-faded entries; returns true while any fade is still active.
-  bool _pruneFades() {
-    final Duration duration = renderer.tileCrossFadeDuration;
-    final DateTime now = DateTime.now();
-    _publishedAt.removeWhere((_, DateTime born) => now.difference(born) >= duration);
-    return _publishedAt.isNotEmpty;
-  }
-
   /// Whether any tile is still fading in.
-  bool get _hasActiveFades => _fadeTicker != null;
+  bool get _hasActiveFades => DateTime.now().difference(_lastFadeStart) < renderer.tileCrossFadeDuration;
 
   /// The cross-fade opacity (0..1) for [picture]: ramps linearly over
   /// [Renderer.tileCrossFadeDuration] from its first publication; 1 for
