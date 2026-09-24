@@ -131,7 +131,7 @@ class DatastoreReaderImpl implements DatastoreReader {
       return null;
     }
     LayerContainerCollection layerContainerCollection = LayerContainerCollection(renderthemeLevel.maxLevels);
-    _processMapReadResult(layerContainerCollection, tile, renderthemeLevel, datastoreBundle);
+    await _processMapReadResult(layerContainerCollection, tile, renderthemeLevel, datastoreBundle);
     layerContainerCollection.clashingInfoCollection.collisionFreeOrdered();
     return layerContainerCollection;
   }
@@ -146,20 +146,26 @@ class DatastoreReaderImpl implements DatastoreReader {
     DatastoreBundle? datastoreBundle = await datastore.readLabels(leftUpper, rightLower);
     if (datastoreBundle == null) return null;
     LayerContainerCollection layerContainerCollection = LayerContainerCollection(renderthemeLevel.maxLevels);
-    _processMapReadResult(layerContainerCollection, leftUpper, renderthemeLevel, datastoreBundle);
+    await _processMapReadResult(layerContainerCollection, leftUpper, renderthemeLevel, datastoreBundle);
     layerContainerCollection.drawings.clear();
     layerContainerCollection.clashingInfoCollection.clear();
     layerContainerCollection.labels.collisionFreeOrdered();
     return layerContainerCollection;
   }
 
-  /// Creates rendering instructions based on the given ways and nodes and the defined rendertheme
-  void _processMapReadResult(
+  /// Creates rendering instructions based on the given ways and nodes and the defined rendertheme.
+  ///
+  /// Async so the way loop can yield to the event loop every few ms: on the
+  /// UI isolate a dense high-zoom city tile otherwise processes thousands of
+  /// ways in one frame-blocking burst.
+  Future<void> _processMapReadResult(
     LayerContainerCollection layerContainerCollection,
     Tile tile,
     RenderthemeZoomlevel renderthemeLevel,
     DatastoreBundle datastoreBundle,
-  ) {
+  ) async {
+    final Stopwatch sliceWatch = Stopwatch()..start();
+    int sliceCounter = 0;
     PixelProjection projection = PixelProjection(tile.zoomLevel);
     for (PointOfInterest pointOfInterest in datastoreBundle.pointOfInterests) {
       List<Renderinstruction> renderinstructions = renderthemeLevel.matchNode(tile.indoorLevel, pointOfInterest);
@@ -174,6 +180,13 @@ class DatastoreReaderImpl implements DatastoreReader {
     // never ever call an async method 44000 times. It takes 2 seconds to do so!
     //    Future.wait(mapReadResult.ways.map((way) => _renderWay(renderContext, PolylineContainer(way, renderContext.job.tile))));
     for (Way way in datastoreBundle.ways) {
+      // ~4ms slices, elapsed check every 32 ways (a Stopwatch read per way
+      // would itself cost). A zero-duration timer gives the event loop a full
+      // turn so a due vsync frame can paint mid-tile.
+      if ((++sliceCounter & 0x1F) == 0 && sliceWatch.elapsedMilliseconds >= 4) {
+        await Future.delayed(Duration.zero);
+        sliceWatch.reset();
+      }
       if (way.latLongs.isEmpty || way.latLongs[0].isEmpty) continue;
       // Rule matching FIRST: it is tag-cached (one map lookup for repeated
       // tag sets) and way-count bound, while geometry projection is

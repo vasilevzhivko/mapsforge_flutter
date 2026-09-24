@@ -108,6 +108,29 @@ class IsolateDatastoreRenderer implements Renderer {
 
 //////////////////////////////////////////////////////////////////////////////
 
+/// Yields to the event loop every ~4ms of continuous painting so pending
+/// frame callbacks run between slices of a long tile render. The elapsed
+/// check runs every 32 items — a Stopwatch read per path would itself cost.
+class _PaintYielder {
+  final Stopwatch _stopwatch = Stopwatch()..start();
+
+  int _counter = 0;
+
+  static const int _sliceMilliseconds = 4;
+
+  Future<void> maybeYield() async {
+    if ((++_counter & 0x1F) != 0) return;
+    if (_stopwatch.elapsedMilliseconds >= _sliceMilliseconds) {
+      // A zero-duration timer (not a microtask): the event loop gets a full
+      // turn, which is what lets a due vsync frame paint.
+      await Future.delayed(Duration.zero);
+      _stopwatch.reset();
+    }
+  }
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
 class _RendererInstanceRequest {
   final Rendertheme rendertheme;
 
@@ -254,13 +277,21 @@ class DatastoreRenderer extends Renderer {
     PixelProjection projection = PixelProjection(job.tile.zoomLevel);
     Mappoint leftUpper = projection.getLeftUpper(job.tile);
     UiRenderContext renderContext = UiRenderContext(canvas: canvas, reference: leftUpper, projection: projection);
+    // Painting runs on the UI isolate (dart:ui forbids recording anywhere
+    // else), so a dense city tile at high zoom — thousands of building/road
+    // paths — would otherwise block frames for its whole 20-50ms burst. The
+    // yielder gives the event loop a turn every few ms of painting; frames
+    // interleave with tile production instead of stalling behind it.
+    _PaintYielder yielder = _PaintYielder();
     await PainterFactory().initDrawingLayers(layerContainerCollection.drawings);
     for (RenderInfo renderInfo in layerContainerCollection.drawings.renderInfos) {
       renderInfo.render(renderContext);
+      await yielder.maybeYield();
     }
     await PainterFactory().initDrawingLayers(layerContainerCollection.clashingInfoCollection);
     for (RenderInfo renderInfo in layerContainerCollection.clashingInfoCollection.renderInfos) {
       renderInfo.render(renderContext);
+      await yielder.maybeYield();
     }
 
     if (useSeparateLabelLayer) {
