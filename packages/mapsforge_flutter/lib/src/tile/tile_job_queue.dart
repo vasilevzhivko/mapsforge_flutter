@@ -74,6 +74,29 @@ class TileJobQueue extends ChangeNotifier {
   /// [_sweepZombies] as soon as no tileSet does.
   final Set<TilePicture> _zombies = {};
 
+  /// Pictures produced but not yet published into a tileSet — the producer
+  /// parks here across its await on [_publishGate]. During that window the
+  /// picture is in no job's images map, so a budget eviction would otherwise
+  /// dispose it outright; the producer then registered the dead picture as a
+  /// zombie and the sweep disposed it AGAIN (Image.dispose assert). Both
+  /// [onEvict] and [_sweepZombies] treat these as referenced. Identity-keyed
+  /// reference counts: concurrent producers can share one picture via
+  /// getOrProduce's in-flight future.
+  final Map<TilePicture, int> _awaitingPublication = Map.identity();
+
+  void _retainForPublication(TilePicture picture) {
+    _awaitingPublication[picture] = (_awaitingPublication[picture] ?? 0) + 1;
+  }
+
+  void _releaseForPublication(TilePicture picture) {
+    final int refs = (_awaitingPublication[picture] ?? 1) - 1;
+    if (refs <= 0) {
+      _awaitingPublication.remove(picture);
+    } else {
+      _awaitingPublication[picture] = refs;
+    }
+  }
+
   /// First-publication time per picture, driving the per-tile cross-fade
   /// (see [fadeOpacityFor]). Identity-keyed; an entry lives as long as its
   /// picture (removed in _disposePicture) and is NEVER pruned earlier:
@@ -116,17 +139,13 @@ class TileJobQueue extends ChangeNotifier {
       weigher: (TilePicture? picture) => picture == null ? 64 : math.max(64, picture.imageWidth * picture.imageHeight * 4),
       onEvict: (tile, picture) {
         if (picture == null) return;
-        // Do not dispose if the picture is still being painted by the
-        // current, pending or previous (zoom-underlay) job — park it in the
-        // zombie list instead so it gets disposed once it leaves the screen.
-        final inCurrent = _currentJob?.tileSet.images[tile] == picture;
-        final inPending = _pendingJob?.tileSet.images[tile] == picture;
-        final inPrevious = _previousJob?.tileSet.images[tile] == picture;
-        if (inCurrent || inPending || inPrevious) {
-          _zombies.add(picture);
-        } else {
-          _disposePicture(picture);
-        }
+        // NEVER dispose here — always park in the zombie list and let
+        // [_sweepZombies] (the single owner of disposal) reclaim it once
+        // nothing references it. Disposing inline raced the publish gate: a
+        // produced picture evicted while its producer awaited the gate was
+        // disposed here, then registered as a zombie and disposed AGAIN by
+        // the sweep (Image.dispose assert / potential UAF in release).
+        _zombies.add(picture);
       },
     );
 
@@ -304,6 +323,8 @@ class TileJobQueue extends ChangeNotifier {
     if (_currentJob != null) referenced.addAll(_currentJob!.tileSet.images.values);
     if (_pendingJob != null) referenced.addAll(_pendingJob!.tileSet.images.values);
     if (_previousJob != null) referenced.addAll(_previousJob!.tileSet.images.values);
+    // Produced but still awaiting the publish gate — not yet in any tileSet.
+    referenced.addAll(_awaitingPublication.keys);
     _zombies.removeWhere((picture) {
       if (referenced.contains(picture)) return false;
       _disposePicture(picture);
@@ -596,28 +617,37 @@ class TileJobQueue extends ChangeNotifier {
       }
     });
     if (myJob._abort) return;
-    // Spread publications across frames (a few per frame): after a zoom the
-    // near-instant disk hits would otherwise land dozens of first-draw
-    // texture uploads in one frame — the residual raster-thread jank spikes.
-    await _publishGate();
-    if (myJob._abort) return;
-    if (picture != null) {
-      // If the cache refused ownership (oversized entry) the picture would
-      // otherwise never be disposed — track it as a zombie. Idempotent for
-      // pictures the cache evicted into the zombie list already.
-      if (!_cache.containsKey(tile)) _zombies.add(picture);
-      _markPublished(picture);
-      tileSet.images[tile] = picture;
-      _enforceGlobalTileBudget();
-      //print("Added picture for tile $tile for renderer ${renderer.getRenderKey()}");
-    } else {
-      final TilePicture miss = await (renderer.transparentOnMiss ? ImageHelper().createTransparentBitmap() : ImageHelper().createNoDataBitmap());
-      TileImageStats.add(miss.imageWidth, miss.imageHeight);
-      // Never cache-owned — register as zombie so the sweep disposes it once
-      // this tileSet leaves the screen.
-      _zombies.add(miss);
-      _markPublished(miss);
-      tileSet.images[tile] = miss;
+    // Keep the picture alive across the publish-gate wait: it is in no
+    // tileSet yet, so a budget eviction during the wait would otherwise hand
+    // the zombie sweep an unreferenced — and thus disposable — picture that
+    // we are about to publish.
+    if (picture != null) _retainForPublication(picture);
+    try {
+      // Spread publications across frames (a few per frame): after a zoom the
+      // near-instant disk hits would otherwise land dozens of first-draw
+      // texture uploads in one frame — the residual raster-thread jank spikes.
+      await _publishGate();
+      if (myJob._abort) return;
+      if (picture != null) {
+        // If the cache refused ownership (oversized entry) the picture would
+        // otherwise never be disposed — track it as a zombie. Idempotent for
+        // pictures the cache evicted into the zombie list already.
+        if (!_cache.containsKey(tile)) _zombies.add(picture);
+        _markPublished(picture);
+        tileSet.images[tile] = picture;
+        _enforceGlobalTileBudget();
+        //print("Added picture for tile $tile for renderer ${renderer.getRenderKey()}");
+      } else {
+        final TilePicture miss = await (renderer.transparentOnMiss ? ImageHelper().createTransparentBitmap() : ImageHelper().createNoDataBitmap());
+        TileImageStats.add(miss.imageWidth, miss.imageHeight);
+        // Never cache-owned — register as zombie so the sweep disposes it once
+        // this tileSet leaves the screen.
+        _zombies.add(miss);
+        _markPublished(miss);
+        tileSet.images[tile] = miss;
+      }
+    } finally {
+      if (picture != null) _releaseForPublication(picture);
     }
     // If this job was waiting (pending), promote it now that we have a tile —
     // this is the moment the blank screen would appear; instead we show the
