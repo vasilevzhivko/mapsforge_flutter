@@ -56,6 +56,44 @@ class LabelJobQueue extends ChangeNotifier {
 
   LabelSet get labelSet => _currentJob!.labelSet;
 
+  /// Gesture-time (rotation/scale) label repaints are throttled to this
+  /// interval — see setPosition's fast path.
+  static const Duration _gestureEmitInterval = Duration(milliseconds: 33);
+
+  DateTime _lastGestureEmit = DateTime.fromMillisecondsSinceEpoch(0);
+
+  Timer? _trailingGestureEmit;
+
+  MapPosition? _pendingGesturePosition;
+
+  /// Publishes the latest pending rotation/scale position to the painter.
+  void _applyGesturePosition() {
+    final MapPosition? position = _pendingGesturePosition;
+    final _CurrentJob? current = _currentJob;
+    if (position == null || current == null) return;
+    _pendingGesturePosition = null;
+    // A newer full/translation update replaced the job since this was
+    // scheduled — the pending gesture position is stale for it.
+    if (current.labelSet.mapPosition.latitude != position.latitude ||
+        current.labelSet.mapPosition.longitude != position.longitude ||
+        current.labelSet.mapPosition.zoomlevel != position.zoomlevel ||
+        current.labelSet.mapPosition.indoorLevel != position.indoorLevel) {
+      return;
+    }
+    _lastGestureEmit = DateTime.now();
+    final LabelSet labelSet = LabelSet(center: current.labelSet.center, mapPosition: position, renderInfos: current.labelSet.renderInfos);
+    _currentJob = _CurrentJob(current.tileDimension, labelSet);
+    _emitLabelSetBatched(labelSet);
+  }
+
+  /// Drops any scheduled gesture repaint — called when a non-gesture path
+  /// (pan/zoom recompute) takes over.
+  void _cancelTrailingGesture() {
+    _trailingGestureEmit?.cancel();
+    _trailingGestureEmit = null;
+    _pendingGesturePosition = null;
+  }
+
   /// The map-pixel anchor the current labels were painted against, or null
   /// before the first job. [LabelView] translates the cached label raster by
   /// (anchor - currentCenter) during pans instead of repainting it.
@@ -69,13 +107,27 @@ class LabelJobQueue extends ChangeNotifier {
         _currentJob?.labelSet.mapPosition.longitude == position.longitude &&
         _currentJob?.labelSet.mapPosition.zoomlevel == position.zoomlevel &&
         _currentJob?.labelSet.mapPosition.indoorLevel == position.indoorLevel) {
-      // do not recalculate for rotation or scaling
-      LabelSet labelSet = LabelSet(center: _currentJob!.labelSet.center, mapPosition: position, renderInfos: _currentJob!.labelSet.renderInfos);
-      _CurrentJob myJob = _CurrentJob(_currentJob!.tileDimension, labelSet);
-      _currentJob = myJob;
-      _emitLabelSetBatched(_currentJob!.labelSet);
+      // Rotation/scale change: labels must repaint (they counter-rotate and
+      // counter-scale to stay upright/constant-size) — but NOT at the frame
+      // rate. During a pinch/rotate every frame repainted hundreds of
+      // paragraphs and symbols, which on a 120Hz display (8.3ms budget) is
+      // the label layer's remaining gesture bottleneck in dense areas.
+      // Repaint at most ~30Hz mid-gesture; a trailing update guarantees the
+      // exact final state always renders.
+      _pendingGesturePosition = position;
+      final DateTime now = DateTime.now();
+      final Duration sinceLast = now.difference(_lastGestureEmit);
+      if (sinceLast >= _gestureEmitInterval) {
+        _applyGesturePosition();
+      } else {
+        _trailingGestureEmit ??= Timer(_gestureEmitInterval - sinceLast, () {
+          _trailingGestureEmit = null;
+          _applyGesturePosition();
+        });
+      }
       return;
     }
+    _cancelTrailingGesture();
     final LabelSet? current = _currentJob?.labelSet;
     if (current != null &&
         current.mapPosition.zoomlevel == position.zoomlevel &&
@@ -114,6 +166,7 @@ class LabelJobQueue extends ChangeNotifier {
   @override
   void dispose() {
     super.dispose();
+    _cancelTrailingGesture();
     _currentJob?.abort();
     _renderChangedSubscription.cancel();
     _taskQueue.cancel();
