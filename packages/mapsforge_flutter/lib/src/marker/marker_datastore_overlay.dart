@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/cupertino.dart';
 import 'package:mapsforge_flutter/mapsforge.dart';
 import 'package:mapsforge_flutter/src/marker/marker_datastore.dart';
@@ -138,6 +140,21 @@ class _MarkerDatastoreOverlayState extends State<MarkerDatastoreOverlay> {
   /// A value of -1 indicates no previous zoom level has been cached.
   int _cachedZoomlevel = -1;
 
+  /// The position the marker painter is ANCHORED to. Markers are painted
+  /// (and raster-cached behind a RepaintBoundary) against this position;
+  /// pure pans translate the cached raster instead of re-rendering every
+  /// marker per frame — the same recipe that fixed the label layer.
+  /// Re-anchoring (a new instance here, which the painter's shouldRepaint
+  /// detects by identity) happens immediately on zoom/indoor changes and at
+  /// most every [_gestureAnchorInterval] on rotation/scale changes.
+  MapPosition? _anchor;
+
+  static const Duration _gestureAnchorInterval = Duration(milliseconds: 33);
+
+  DateTime _lastGestureAnchor = DateTime.fromMillisecondsSinceEpoch(0);
+
+  Timer? _trailingAnchor;
+
   @override
   void initState() {
     super.initState();
@@ -146,8 +163,41 @@ class _MarkerDatastoreOverlayState extends State<MarkerDatastoreOverlay> {
 
   @override
   void dispose() {
+    _trailingAnchor?.cancel();
     widget.mapModel.unregisterMarkerDatastore(widget.datastore);
     super.dispose();
+  }
+
+  /// Updates [_anchor] for [position]: immediately for zoom/indoor changes,
+  /// throttled (with a trailing update so the final state always lands) for
+  /// rotation/scale, and NOT AT ALL for pure translation — panning is
+  /// expressed by translating the cached raster.
+  void _updateAnchor(MapPosition position) {
+    final MapPosition? anchor = _anchor;
+    if (anchor == null || anchor.zoomlevel != position.zoomlevel || anchor.indoorLevel != position.indoorLevel) {
+      _trailingAnchor?.cancel();
+      _trailingAnchor = null;
+      _anchor = position;
+      return;
+    }
+    if (anchor.rotation == position.rotation && anchor.scale == position.scale) {
+      return; // translation only — the cached raster is reused
+    }
+    final DateTime now = DateTime.now();
+    final Duration sinceLast = now.difference(_lastGestureAnchor);
+    if (sinceLast >= _gestureAnchorInterval) {
+      _lastGestureAnchor = now;
+      _anchor = position;
+    } else {
+      _trailingAnchor ??= Timer(_gestureAnchorInterval - sinceLast, () {
+        _trailingAnchor = null;
+        if (!mounted) return;
+        setState(() {
+          _lastGestureAnchor = DateTime.now();
+          _anchor = widget.mapModel.lastPosition;
+        });
+      });
+    }
   }
 
   /// Called when the widget configuration changes.
@@ -226,12 +276,27 @@ class _MarkerDatastoreOverlayState extends State<MarkerDatastoreOverlay> {
                 return const SizedBox();
               }
             }
-            // Render markers with proper coordinate transformation
+            // Render markers with proper coordinate transformation. The
+            // painter is anchored (see _updateAnchor) and raster-cached
+            // behind a RepaintBoundary; pans translate the cached raster —
+            // previously every position event re-rendered EVERY visible
+            // marker, the remaining per-frame cost in marker-dense cities.
+            _updateAnchor(position);
+            final MapPosition anchor = _anchor!;
+            Widget content = RepaintBoundary(
+              child: CustomPaint(foregroundPainter: MarkerDatastorePainter(anchor, widget.datastore), child: const SizedBox.expand()),
+            );
+            final Mappoint anchorCenter = anchor.getCenter();
+            final Mappoint currentCenter = position.getCenter();
+            final double dx = anchorCenter.x - currentCenter.x, dy = anchorCenter.y - currentCenter.y;
+            if (dx != 0 || dy != 0) {
+              content = Transform.translate(offset: Offset(dx, dy), child: content);
+            }
             return TransformWidget(
               mapCenter: position.getCenter(),
               mapPosition: position,
               screensize: screensize,
-              child: CustomPaint(foregroundPainter: MarkerDatastorePainter(position, widget.datastore), child: const SizedBox.expand()),
+              child: content,
             );
           },
         );

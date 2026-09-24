@@ -102,6 +102,8 @@ class MarkerDatastorePainter extends CustomPainter {
       reference: mapPosition.getCenter(),
       projection: mapPosition.projection,
       rotationRadian: mapPosition.rotationRadian,
+      // Keep marker symbols a constant on-screen size under fractional zoom.
+      scale: mapPosition.scale,
     );
 
     // Get markers to render from datastore
@@ -129,6 +131,12 @@ class MarkerDatastorePainter extends CustomPainter {
   bool shouldRepaint(covariant MarkerDatastorePainter oldDelegate) {
     // Repaint if the datastore instance has changed
     if (oldDelegate.datastore != datastore) return true;
+    // Repaint when the overlay re-anchors the painter to a new position
+    // (zoom/rotation/scale change) — behind the overlay's RepaintBoundary
+    // this comparison is what actually triggers the redraw. Positions are
+    // compared by identity: the overlay passes the same instance until it
+    // deliberately re-anchors.
+    if (!identical(oldDelegate.mapPosition, mapPosition)) return true;
     return false;
   }
 }
