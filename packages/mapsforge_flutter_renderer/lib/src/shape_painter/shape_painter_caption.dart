@@ -12,6 +12,11 @@ import 'package:mapsforge_flutter_renderer/src/ui/ui_text_paint.dart';
 import 'package:mapsforge_flutter_rendertheme/model.dart';
 import 'package:mapsforge_flutter_rendertheme/renderinstruction.dart';
 
+/// On-screen size factor for map captions (place/street names, contour numbers),
+/// applied on top of the fractional-zoom counter-scale. <1 renders labels a
+/// touch smaller than the raw render-theme size. Tune here.
+const double kCaptionSizeFactor = 0.8;
+
 /// Shape painter for rendering text captions on the map.
 ///
 /// This painter is responsible for drawing text labels for nodes (e.g., POIs)
@@ -82,11 +87,19 @@ class ShapePainterCaption extends UiShapePainter<RenderinstructionCaption> {
 
     MappointRelative relative = nodeProperties.getCoordinatesAbsolute().offset(renderContext.reference).offset(0, renderinstruction.dy);
     ui.Canvas? uiCanvas = renderContext.canvas.expose();
-    if (renderContext.rotationRadian != 0) {
+    // Counter-scale text by 1/scale around its anchor so it stays a constant
+    // on-screen size under the fractional-zoom residual (same reason as symbols;
+    // the enclosing TransformWidget re-applies `scale`), times a small factor so
+    // captions read a touch smaller than the raw theme size. Combined with the
+    // rotation-keeps-horizontal transform.
+    final double effScale = kCaptionSizeFactor / renderContext.scale;
+    final bool needTransform = renderContext.rotationRadian != 0 || effScale != 1.0;
+    if (needTransform) {
       uiCanvas.save();
       uiCanvas.translate(relative.dx, relative.dy);
+      if (effScale != 1.0) uiCanvas.scale(effScale);
       // if the map is rotated 30° clockwise we have to paint the caption -30° (counter-clockwise) so that it is horizontal
-      uiCanvas.rotate(-renderContext.rotationRadian);
+      if (renderContext.rotationRadian != 0) uiCanvas.rotate(-renderContext.rotationRadian);
       uiCanvas.translate(-relative.dx, -relative.dy);
     }
 
@@ -110,7 +123,7 @@ class ShapePainterCaption extends UiShapePainter<RenderinstructionCaption> {
     if (back != null) uiCanvas.drawParagraph(back.paragraph, ui.Offset(relative.dx + boundary.left, relative.dy + boundary.top));
     if (front != null) uiCanvas.drawParagraph(front.paragraph, ui.Offset(relative.dx + boundary.left, relative.dy + boundary.top));
     //uiCanvas.drawCircle(ui.Offset(relative.dx, relative.dy), 10, ui.Paint()..color = Colors.green.withOpacity(0.5));
-    if (renderContext.rotationRadian != 0) {
+    if (needTransform) {
       uiCanvas.restore();
     }
   }
@@ -126,11 +139,17 @@ class ShapePainterCaption extends UiShapePainter<RenderinstructionCaption> {
     //print("paint caption boundar: $boundary $relative ${shape}");
 
     ui.Canvas? uiCanvas = renderContext.canvas.expose();
-    if (renderContext.rotationRadian != 0) {
+    // Counter-scale by 1/scale around the anchor (times the small size factor) so
+    // way labels (street names, contour numbers) stay a constant, slightly
+    // smaller on-screen size under fractional zoom.
+    final double effScale = kCaptionSizeFactor / renderContext.scale;
+    final bool needTransform = renderContext.rotationRadian != 0 || effScale != 1.0;
+    if (needTransform) {
       uiCanvas.save();
       uiCanvas.translate(relative.dx, relative.dy);
+      if (effScale != 1.0) uiCanvas.scale(effScale);
       // if the map is rotated 30° clockwise we have to paint the caption -30° (counter-clockwise) so that it is horizontal
-      uiCanvas.rotate(2 * pi - renderContext.rotationRadian);
+      if (renderContext.rotationRadian != 0) uiCanvas.rotate(2 * pi - renderContext.rotationRadian);
       uiCanvas.translate(-relative.dx, -relative.dy);
     }
 
@@ -153,7 +172,7 @@ class ShapePainterCaption extends UiShapePainter<RenderinstructionCaption> {
     if (front != null) uiCanvas.drawParagraph(front.paragraph, ui.Offset(relative.dx + boundary.left, relative.dy + boundary.top));
     // uiCanvas.drawCircle(ui.Offset(this.xy.x - origin.x, this.xy.y - origin.y),
     //     5, ui.Paint()..color = Colors.blue);
-    if (renderContext.rotationRadian != 0) {
+    if (needTransform) {
       uiCanvas.restore();
     }
   }

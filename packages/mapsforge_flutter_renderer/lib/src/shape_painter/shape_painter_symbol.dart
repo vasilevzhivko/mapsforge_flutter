@@ -106,6 +106,19 @@ class ShapePainterSymbol extends UiShapePainter<RenderinstructionSymbol> {
       uiCanvas.drawCircle(ui.Offset(relative.dx, relative.dy), 10, ui.Paint()..color = Colors.green.withOpacity(0.5));
     }
 
+    // Keep the symbol a CONSTANT on-screen size under the view's fractional-zoom
+    // scale (counter-scale by 1/scale around the ANCHOR so the enclosing
+    // TransformWidget's re-apply of `scale` nets out), times an optional size
+    // factor so render-theme symbols can read a touch smaller. scale==1 &&
+    // factor==1 (tiles, app markers) is a no-op.
+    final double effScale = renderContext.symbolSizeFactor / renderContext.scale;
+    final ui.Canvas? raw = effScale != 1.0 ? renderContext.canvas.expose() : null;
+    if (raw != null) {
+      raw.save();
+      raw.translate(relative.dx, relative.dy);
+      raw.scale(effScale);
+      raw.translate(-relative.dx, -relative.dy);
+    }
     renderContext.canvas.drawPicture(
       symbolImage: symbolImage!,
       matrix: matrix,
@@ -113,6 +126,7 @@ class ShapePainterSymbol extends UiShapePainter<RenderinstructionSymbol> {
       top: relative.dy + boundary.top,
       paint: fill,
     );
+    if (raw != null) raw.restore();
   }
 
   /// Renders a symbol for a way.

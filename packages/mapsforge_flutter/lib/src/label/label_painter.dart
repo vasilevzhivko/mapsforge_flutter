@@ -22,6 +22,12 @@ class LabelPainter extends CustomPainter {
       reference: center,
       projection: projection,
       rotationRadian: labelSet.mapPosition.rotationRadian,
+      // So point symbols counter-scale and stay a constant on-screen size under
+      // the persistent fractional-zoom residual (they were magnified up to ~2×).
+      scale: labelSet.mapPosition.scale,
+      // Render-theme (Elevate) POI symbols read a touch smaller than the raw
+      // theme size. App markers use their own painters (factor stays 1.0). Tune.
+      symbolSizeFactor: 0.8,
     );
     for (RenderInfoCollection renderInfoCollection in labelSet.renderInfos) {
       for (var renderInfo in renderInfoCollection.renderInfos) {

@@ -14,9 +14,17 @@ class RotateHelper {
     //     viewModel.mapViewPosition?.getLeftUpper(viewModel.mapDimension);
     Mappoint center = position.getCenter();
 
-    /// x/y relative from the center
-    double diffX = (dx - size.width / 2) * MapsforgeSettingsMgr().getDeviceScaleFactor();
-    double diffY = (dy - size.height / 2) * MapsforgeSettingsMgr().getDeviceScaleFactor();
+    /// x/y relative from the center, in map pixels.
+    ///
+    /// We divide by [MapPosition.scale] to invert the continuous pinch-zoom
+    /// scale that [TransformWidget] applies around the screen centre when
+    /// rendering (scale != 1 during fractional zoom). Without this term the
+    /// tap→map-pixel error is zero at the centre and grows linearly towards the
+    /// edges, so only markers near the centre of the screen are tappable.
+    /// It is a no-op at integer zoom, where scale == 1.
+    final double scaleFactor = MapsforgeSettingsMgr().getDeviceScaleFactor() / position.scale;
+    double diffX = (dx - size.width / 2) * scaleFactor;
+    double diffY = (dy - size.height / 2) * scaleFactor;
     if (position.rotation != 0) {
       double hyp = sqrt(diffX * diffX + diffY * diffY);
       double rad = atan2(diffY, diffX);

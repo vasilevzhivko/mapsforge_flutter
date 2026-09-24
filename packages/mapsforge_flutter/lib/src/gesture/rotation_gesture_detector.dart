@@ -45,7 +45,10 @@ class RotationGestureDetector extends StatefulWidget {
   const RotationGestureDetector({
     super.key,
     required this.mapModel,
-    this.thresholdDeg = 10.0,
+    // Twist needed before rotation engages. A middle ground: high enough that an
+    // ordinary pinch-zoom's small twist doesn't accidentally rotate, but low
+    // enough that a deliberate twist engages before a long-press fires.
+    this.thresholdDeg = 18.0,
     this.locked = false,
     this.resetChild,
     this.left,
@@ -121,7 +124,11 @@ class _RotationGestureDetectorState extends State<RotationGestureDetector> {
 
           if (!_rotating) {
             if (delta.abs() > widget.thresholdDeg) {
+              // Engage rotation, but start clean from HERE so the map doesn't
+              // snap by the whole threshold at the moment it kicks in.
               _rotating = true;
+              _baselineAngle = newAngle;
+              return;
             } else {
               return; // still pinch/drag
             }

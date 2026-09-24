@@ -2,6 +2,7 @@ import 'dart:math';
 import 'dart:ui';
 
 import 'package:flutter/foundation.dart';
+import 'package:logging/logging.dart';
 import 'package:mapsforge_flutter/mapsforge.dart';
 import 'package:mapsforge_flutter/marker.dart';
 import 'package:mapsforge_flutter_core/model.dart';
@@ -11,6 +12,8 @@ import 'package:mapsforge_flutter_rendertheme/model.dart';
 import 'package:rxdart/rxdart.dart';
 
 class MapModel extends ChangeNotifier {
+  static final _log = Logger('MapModel');
+
   final List<Renderer> _renderers = [];
 
   MapPosition? _lastPosition;
@@ -278,6 +281,32 @@ class MapModel extends ChangeNotifier {
 
   void zoomToAround(double latitude, double longitude, int zoomLevel) {
     zoomLevel = zoomlevelRange.ensureBounds(zoomLevel);
+    final MapPosition? last = _lastPosition;
+    if (last != null) {
+      // Guard against a corrupted pinch focal point (especially combined with
+      // rotation) flinging the centre hundreds of km to a map corner ("sent to
+      // Istanbul"): if a single zoom-commit would move the centre by an absurd
+      // amount — non-finite, or more than a few viewports — apply the zoom but
+      // KEEP the current centre instead of the bogus recentre. Ordinary
+      // recentres move well under one viewport, so this never fires in normal
+      // use; it only defuses the fling.
+      bool bogus = !latitude.isFinite || !longitude.isFinite;
+      final Size? view = _viewSize;
+      if (!bogus && view != null) {
+        final PixelProjection proj = PixelProjection(last.zoomlevel);
+        final double dx = proj.longitudeToPixelX(longitude) - proj.longitudeToPixelX(last.longitude);
+        final double dy = proj.latitudeToPixelY(latitude) - proj.latitudeToPixelY(last.latitude);
+        final double cap = 4 * max(view.width, view.height);
+        if (dx * dx + dy * dy > cap * cap) bogus = true;
+      }
+      if (bogus) {
+        _log.warning('zoomToAround: rejected bogus recentre to '
+            '$latitude/$longitude (from ${last.latitude}/${last.longitude}) — '
+            'kept centre, applied zoom $zoomLevel');
+        setPosition(last.zoomToAround(last.latitude, last.longitude, zoomLevel));
+        return;
+      }
+    }
     MapPosition newPosition = _lastPosition!.zoomToAround(latitude, longitude, zoomLevel);
     setPosition(newPosition);
   }

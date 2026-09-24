@@ -99,7 +99,6 @@ class _Handler {
 
   _Vector? _startVector;
 
-  _Vector? _lastVector;
 
   double _lastScale = 1;
 
@@ -120,7 +119,6 @@ class _Handler {
     // previous contact made every replant fire spurious commits from stale
     // state and run the zoom away.
     _startVector = _Vector(_points.values.first, _points.values.last);
-    _lastVector = null;
     lastPosition = mapModel.lastPosition!;
     // The map may be SETTLED at a fractional zoom (scale in [1,2) — see
     // _sendEnd). The displayed scale must start the gesture from there, not
@@ -159,7 +157,6 @@ class _Handler {
     // Re-anchor until the fingers are meaningfully apart.
     if (_startVector!.getLength() < 30) {
       _startVector = newVector;
-      _lastVector = newVector;
       return;
     }
     double effective = newVector.getLength() / _startVector!.getLength() / _committedFactor;
@@ -184,7 +181,11 @@ class _Handler {
     final bool farCrossed = effective >= 4.0 || effective <= 0.25;
     if (crossed && (farCrossed || DateTime.now().difference(_lastCommitAt) >= _commitInterval)) {
       final int zoomLevelDiff = (log(effective) / log(2)).truncate();
-      final int achieved = _commitZoomStep(zoomLevelDiff, newVector.getFocalPoint());
+      // Zoom around the SCREEN CENTRE, not the finger focal: the map stays put
+      // and only the zoom changes (like mapy.cz / most map apps' button zoom).
+      // Focal-anchored zoom-out amplified any focal offset by 1/mult and walked
+      // the centre across the region ("sent to Istanbul/Serbia").
+      final int achieved = _commitZoomStep(zoomLevelDiff, _screenCentre());
       if (achieved != 0) {
         _committedFactor *= pow(2, achieved);
         effective = newVector.getLength() / _startVector!.getLength() / _committedFactor;
@@ -192,9 +193,13 @@ class _Handler {
       }
     }
     _lastScale = effective;
-    mapModel.scaleAround(newVector.getFocalPoint(), effective);
-    _lastVector = newVector;
+    // Centre-anchored live scale (null focal → scales around the screen centre)
+    // so the whole gesture — live and commit — keeps the map static.
+    mapModel.scaleAround(null, effective);
   }
+
+  /// The screen centre in logical pixels — the anchor for centre-based zoom.
+  Offset _screenCentre() => Offset(size.width / 2, size.height / 2);
 
   /// Commits [zoomLevelDiff] levels around [focalPoint] mid-gesture, exactly
   /// like the release commit. Returns the zoom delta actually achieved.
@@ -231,8 +236,9 @@ class _Handler {
     double residual = _lastScale / pow(2, zoomLevelDiff);
     if (residual < 1) residual = 1;
 
-    // Fall back to screen centre if we never got a move event with 2 fingers
-    final focalPoint = _lastVector?.getFocalPoint() ?? Offset(size.width / 2, size.height / 2);
+    // Centre-anchored: settle the residual around the screen centre so the map
+    // stays static through the whole gesture (matches the live scale above).
+    final focalPoint = _screenCentre();
 
     if (zoomLevelDiff == 0 && (residual - mapModel.lastPosition!.scale).abs() < 0.005) {
       // Nothing changed (e.g. a two-finger tap) — do not nudge the map.

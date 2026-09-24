@@ -18,6 +18,8 @@ class SingleMarkerPainter extends CustomPainter {
       reference: mapPosition.getCenter(),
       projection: mapPosition.projection,
       rotationRadian: mapPosition.rotationRadian,
+      // Keep marker symbols a constant on-screen size under fractional zoom.
+      scale: mapPosition.scale,
     );
     marker.render(renderContext);
   }
