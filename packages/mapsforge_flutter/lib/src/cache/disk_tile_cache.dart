@@ -118,6 +118,13 @@ class DiskTileCache {
   File _fileFor(String rendererKey, Tile tile) =>
       File('${_dir!.path}${Platform.pathSeparator}${stableHash(rendererKey)}_${tile.zoomLevel}_${tile.tileX}_${tile.tileY}_${tile.indoorLevel}.png');
 
+  /// True if a tile is already stored — a cheap file-existence check, no
+  /// read or decode (used by the prewarmer to skip work).
+  Future<bool> contains(String rendererKey, Tile tile) async {
+    if (_dir == null || tile.zoomLevel > _maxZoom) return false;
+    return _fileFor(rendererKey, tile).exists();
+  }
+
   /// Returns the cached tile as a ready [TilePicture], or null on a miss.
   /// PNG decoding runs on the engine's IO workers, not the UI thread.
   Future<TilePicture?> read(String rendererKey, Tile tile) async {
