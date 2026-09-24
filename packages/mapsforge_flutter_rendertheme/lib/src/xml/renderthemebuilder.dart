@@ -106,7 +106,11 @@ class RenderThemeBuilder {
     renderThemeBuilder._parseXml(content);
     renderThemeBuilder.forHash =
         "${MapsforgeSettingsMgr().getDeviceScaleFactor()}_${MapsforgeSettingsMgr().getUserScaleFactor()}_${MapsforgeSettingsMgr().getLineScaleFactor()}_${MapsforgeSettingsMgr().getFontScaleFactor()}_${MapsforgeSettingsMgr().tileSize}";
-    return renderThemeBuilder._build();
+    // The builder's forHash was never copied onto the built theme — the
+    // theme-side field stayed uninitialized for every theme ever built.
+    final Rendertheme rendertheme = renderThemeBuilder._build();
+    rendertheme.forHash = renderThemeBuilder.forHash;
+    return rendertheme;
   }
 
   /// Builds and returns a rendertheme by loading a rendertheme file. This

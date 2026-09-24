@@ -58,8 +58,12 @@ class Rendertheme {
   /// rule evaluation during rendering.
   final Map<int, RenderthemeZoomlevel> _renderthemeZoomlevels = {};
 
-  /// Hash string used for theme identification and caching.
-  late final String forHash;
+  /// Hash string used for theme identification and caching (scale factors +
+  /// tile size, set by RenderThemeBuilder). Deliberately NOT `late`: it was
+  /// never assigned onto the built theme, so the first-ever reader (the disk
+  /// tile cache key) crashed every tile render with a
+  /// LateInitializationError. Empty means "no scale identity known".
+  String forHash = "";
 
   /// LRU cache for node (POI) rendering instruction matches.
   late final Cache<ITagCollection, ZoomlevelRange> nodeMatchingCache;
