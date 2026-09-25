@@ -99,6 +99,12 @@ abstract class MarkerDatastore<T> with ChangeNotifier {
   @override
   void dispose();
 
+  /// Whether [dispose] has been called. Overlays must check this before using
+  /// the datastore, since a final frame can rebuild the overlay during a
+  /// map / sub-screen teardown (handing a disposed ChangeNotifier to a painter
+  /// then throws "used after disposed").
+  bool get disposed;
+
   /// Called when the map zoom level changes.
   ///
   /// This method provides an opportunity to:

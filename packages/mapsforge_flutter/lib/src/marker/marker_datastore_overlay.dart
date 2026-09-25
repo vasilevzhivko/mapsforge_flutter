@@ -234,6 +234,13 @@ class _MarkerDatastoreOverlayState extends State<MarkerDatastoreOverlay> {
         return ListenableBuilder(
           listenable: widget.mapModel,
           builder: (BuildContext context, Widget? child) {
+            // The datastore can be disposed while a final frame still rebuilds
+            // this overlay during a map/sub-screen teardown — touching it (or
+            // handing it to the painter, which addListener()s to it) then throws
+            // "used after disposed". Bail out safely instead.
+            if (widget.datastore.disposed) {
+              return const SizedBox();
+            }
             MapPosition? position = widget.mapModel.lastPosition;
             if (position == null) {
               return const SizedBox();

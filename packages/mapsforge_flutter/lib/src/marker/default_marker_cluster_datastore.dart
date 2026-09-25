@@ -37,6 +37,7 @@ class DefaultMarkerClusterDatastore<T> extends MarkerDatastore {
     super.dispose();
   }
 
+  @override
   bool get disposed => _disposed;
 
   void _onDatastoreChanged() {

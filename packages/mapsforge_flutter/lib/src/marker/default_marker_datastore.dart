@@ -196,6 +196,7 @@ class DefaultMarkerDatastore<T> extends MarkerDatastore<T> {
     _disposed = true;
   }
 
+  @override
   bool get disposed => _disposed;
 }
 
