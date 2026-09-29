@@ -431,8 +431,21 @@ class TileJobQueue extends ChangeNotifier {
     _sweepZombies();
   }
 
+  /// True once [dispose] has run. Tile jobs already queued when the map closes
+  /// then fire against a torn-down render isolate and fail with "Isolate
+  /// unavailable" — expected on teardown, so we skip the warning for those.
+  bool _disposed = false;
+
+  /// Whether a render error is just teardown noise (queue disposed, job aborted,
+  /// or the isolate is already gone) rather than a real render failure.
+  bool _isTeardownError(bool aborted, Object error) =>
+      _disposed ||
+      aborted ||
+      (error is StateError && error.message.contains('Isolate unavailable'));
+
   @override
   void dispose() {
+    _disposed = true;
     super.dispose();
     _instances.remove(this);
     _fadeTicker?.cancel();
@@ -612,7 +625,12 @@ class TileJobQueue extends ChangeNotifier {
         return result.picture!;
       } catch (error, stacktrace) {
         // error in ecache abort() method. The completer should be checked for isComplete() before injecting an exception
-        _log.warning('tile render failed for $tile', error, stacktrace);
+        if (_isTeardownError(myJob._abort, error)) {
+          // Map closed mid-render — the isolate is gone. Expected, not a fault.
+          _log.finest('tile render skipped during teardown for $tile');
+        } else {
+          _log.warning('tile render failed for $tile', error, stacktrace);
+        }
         rethrow;
       }
     });
@@ -723,7 +741,11 @@ class TileJobQueue extends ChangeNotifier {
             }
           }
         } catch (e, st) {
-          _log.warning('prefetch tile render failed for $t', e, st);
+          if (_isTeardownError(_prefetchVersion != version, e)) {
+            _log.finest('prefetch tile render skipped during teardown for $t');
+          } else {
+            _log.warning('prefetch tile render failed for $t', e, st);
+          }
           picture = await (renderer.transparentOnMiss ? ImageHelper().createTransparentBitmap() : ImageHelper().createNoDataBitmap());
         }
         TileImageStats.add(picture.imageWidth, picture.imageHeight);
