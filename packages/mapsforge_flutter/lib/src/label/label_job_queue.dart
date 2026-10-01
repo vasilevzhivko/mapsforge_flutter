@@ -235,8 +235,15 @@ class LabelJobQueue extends ChangeNotifier {
       Tile rightLower = Tile(min(left + _range - 1, maxTileNbr), min(top + _range - 1, maxTileNbr), position.zoomlevel, position.indoorLevel);
       RenderInfoCollection collection = await _cache.getOrProduce(leftUpper, rightLower, (Tile tile) async {
         JobResult result = await renderer.retrieveLabels(JobRequest(leftUpper, rightLower));
-        if (result.renderInfo == null) throw Exception("No renderInfo for $tile from renderer ${renderer.getRenderKey()}");
-        return result.renderInfo!;
+        // A null renderInfo is a benign, transient outcome — the tile was
+        // evicted, its render job was superseded, the datastore had no data for
+        // it, or the model was disposed mid-read (#577). Returning an empty
+        // collection makes the label producer a no-op for this stale job instead
+        // of throwing: the throw escaped the ecache ProducerEntry/completer path
+        // into the global zone and was logged as a [FATAL]. The batch simply
+        // carries no labels for this tile and re-renders on the next
+        // position/renderChanged event.
+        return result.renderInfo ?? RenderInfoCollection.empty();
       });
       if (myJob._abort) return;
       labelSet.renderInfos.add(collection);
