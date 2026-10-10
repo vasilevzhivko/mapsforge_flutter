@@ -587,7 +587,26 @@ class TileJobQueue extends ChangeNotifier {
 
   Future<void> _producePicture(_CurrentJob myJob, TileSet tileSet, Tile tile) async {
     if (myJob._abort) return;
-    TilePicture? picture = await _cache.getOrProduce(tile, (Tile tile) async {
+    final TilePicture? picture;
+    try {
+      picture = await _produceTile(myJob, tile);
+    } catch (_) {
+      // Already logged at the source by _produceTile (warning, or finest for
+      // teardown). This future is fire-and-forget (unawaited _taskQueue.add),
+      // so a rethrow here escaped to the root zone as a "GLOBAL ZONE ERROR" —
+      // e.g. online (ArcGIS) tiles aborted by the OS after the app was
+      // backgrounded mid-download. The tile is not cached, so it simply
+      // re-renders on the next position event. hikerbgapp #826 #825
+      return;
+    }
+    if (myJob._abort) return;
+    await _publishPicture(myJob, tileSet, tile, picture);
+  }
+
+  /// Renders [tile] through the cache (disk cache first, then the renderer).
+  /// Logs a failure and rethrows it; see [_producePicture].
+  Future<TilePicture?> _produceTile(_CurrentJob myJob, Tile tile) {
+    return _cache.getOrProduce(tile, (Tile tile) async {
       try {
         // Persistent disk cache first: a previously rendered tile loads in a
         // few ms (decode off the UI thread) instead of a full vector render.
@@ -634,7 +653,9 @@ class TileJobQueue extends ChangeNotifier {
         rethrow;
       }
     });
-    if (myJob._abort) return;
+  }
+
+  Future<void> _publishPicture(_CurrentJob myJob, TileSet tileSet, Tile tile, TilePicture? picture) async {
     // Keep the picture alive across the publish-gate wait: it is in no
     // tileSet yet, so a budget eviction during the wait would otherwise hand
     // the zombie sweep an unreferenced — and thus disposable — picture that
