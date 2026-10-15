@@ -88,7 +88,13 @@ class RenderinstructionArea extends Renderinstruction with BaseSrcMixin, BitmapS
       } else if (Renderinstruction.SYMBOL_PERCENT == name) {
         setBitmapPercent(XmlUtils.parseNonNegativeInteger(name, value));
       } else if (Renderinstruction.SYMBOL_SCALING == name) {
-        // no-op
+        // symbol-scaling="size": the theme declares explicit symbol sizes
+        // (typically a per-zoom ladder of rules) and expects them honored
+        // VERBATIM. Without this, bitmapSrcMixinScale multiplies the declared
+        // size by another 1.4^(zoom-12), turning e.g. a 64px terrain pattern
+        // into 482px at z18 — the glyphs blow up and dissolve, so terrain
+        // areas look completely different at every zoom level.
+        if (value == "size") setBitmapMinZoomLevel(665535);
       } else if (Renderinstruction.SYMBOL_WIDTH == name) {
         setBitmapWidth(XmlUtils.parseNonNegativeInteger(name, value));
       } else {
