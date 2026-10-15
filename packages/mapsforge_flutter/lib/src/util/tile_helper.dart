@@ -22,12 +22,16 @@ class TileHelper {
     // more tiles than are visible. That surplus, right where the low-zoom tile
     // cache is already at its ceiling, is what tipped zooming into a freeze.
     // Shrink the fetched extent to what's visible (scale capped at 4x so the
-    // fetch never drops below a quarter viewport). Downscale (scale < 1, a
-    // transient pinch-out) is left untouched — growing the fetch there would
-    // add memory on the same fragile path.
-    final double upscale = mapViewPosition.scale > 1.0 ? min(mapViewPosition.scale, 4.0) : 1.0;
-    halfWidth = halfWidth / upscale;
-    halfHeight = halfHeight / upscale;
+    // fetch never drops below a quarter viewport). A settled downscale
+    // (scale in [0.7, 1): a pinch committed to the NEAREST level) shows up to
+    // ~1.41x the viewport, so grow the fetch to cover it — otherwise the screen
+    // edges stay empty. Deeper downscale (a transient pinch-out) is left
+    // untouched: growing the fetch there would add memory on the same fragile
+    // path.
+    final double s = mapViewPosition.scale;
+    final double fetchScale = s > 1.0 ? min(s, 4.0) : (s >= 0.7 ? s : 1.0);
+    halfWidth = halfWidth / fetchScale;
+    halfHeight = halfHeight / fetchScale;
     // In case of rotation use the max side for both width and height
     halfWidth = max(halfWidth, halfHeight);
     halfHeight = halfWidth;

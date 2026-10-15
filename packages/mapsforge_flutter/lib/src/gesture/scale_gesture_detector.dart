@@ -224,17 +224,16 @@ class _Handler {
 
   void _sendEnd() {
     // Settle at the FRACTIONAL zoom where the fingers left the map (like
-    // Google Maps / Locus): commit whole levels via floor() and keep the
-    // residual scale in [1,2) as the new settled state. The old behaviour
-    // rounded to the NEAREST whole level, so a small pinch rounded to zero
-    // and visibly snapped back — discarding the user's gesture, the top
-    // complaint about the zoom feel.
-    int zoomLevelDiff = (log(_lastScale) / log(2)).floor();
+    // Google Maps / Locus): commit the NEAREST whole level and keep the
+    // residual scale in [0.71, 1.41) as the new settled state, so nothing
+    // snaps back. Committing via floor() kept the residual in [1, 2): tile
+    // content (terrain patterns, contour numbers, line widths) then rested
+    // magnified up to 2x and its on-screen size swung 2x between levels.
+    int zoomLevelDiff = (log(_lastScale) / log(2)).round();
     // Never recentre for zoom levels the model's bounds won't actually apply.
     final int beforeZoom = mapModel.lastPosition!.zoomlevel;
     zoomLevelDiff = mapModel.zoomlevelRange.ensureBounds(beforeZoom + zoomLevelDiff) - beforeZoom;
     double residual = _lastScale / pow(2, zoomLevelDiff);
-    if (residual < 1) residual = 1;
 
     // Centre-anchored: settle the residual around the screen centre so the map
     // stays static through the whole gesture (matches the live scale above).
@@ -260,7 +259,7 @@ class _Handler {
     // what was displayed at release, and re-anchoring it to the centre keeps
     // gesture artifacts (the focal point) out of the settled position.
     final MapPosition committed = mapModel.lastPosition!;
-    if (residual > 1.001) {
+    if ((residual - 1).abs() > 0.001) {
       final PositionInfo f = RotateHelper.normalize(committed, size, focalPoint.dx, focalPoint.dy);
       mapModel.setPosition(
         committed
