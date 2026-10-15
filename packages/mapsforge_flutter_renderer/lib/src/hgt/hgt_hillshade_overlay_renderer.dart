@@ -70,8 +70,12 @@ class HgtHillshadeOverlayRenderer extends Renderer {
     this.cellSizeDeg = 1 / 1200,
     this.minZoom = 9,
     this.zFactor = 1.6,
-    this.shadowMaxAlpha = 104,
-    this.lightMaxAlpha = 32,
+    // Tuned to the strength the old per-zoom fade produced at z18+ (104×0.72),
+    // which field feedback picked as the best-looking shading. Uniform across
+    // zooms — a per-zoom strength made the terrain read differently at every
+    // zoom level (dark dramatic swathes at z13-15, airy at z19).
+    this.shadowMaxAlpha = 75,
+    this.lightMaxAlpha = 23,
   }) {
     final provider = hgtProvider;
     if (provider is HgtFileProvider) {
@@ -113,20 +117,10 @@ class HgtHillshadeOverlayRenderer extends Renderer {
         w = bbox.minLongitude,
         e = bbox.maxLongitude;
 
-    // Gentle fade at the highest zooms, where a tile spans only a couple of
-    // DEM cells — the shading turns into one soft wash there. Kept mild: a
-    // dense vector map reads fine with relief still clearly visible up close.
-    final z = tile.zoomLevel;
-    final double fade;
-    if (z >= 18) {
-      fade = 0.72;
-    } else if (z == 17) {
-      fade = 0.85;
-    } else if (z == 16) {
-      fade = 0.95;
-    } else {
-      fade = 1.0;
-    }
+    // No per-zoom fade: the base opacity is already tuned to the gentle look
+    // (see shadowMaxAlpha) and a zoom-dependent strength made the terrain
+    // read differently at every zoom level. Uniform = consistent relief.
+    const double fade = 1.0;
 
     // Grid resolution. `cells` is how many native DEM cells the tile spans.
     final cells =
