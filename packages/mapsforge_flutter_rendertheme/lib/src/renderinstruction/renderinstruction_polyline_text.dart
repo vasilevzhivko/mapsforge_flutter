@@ -150,32 +150,27 @@ class RenderinstructionPolylineText extends Renderinstruction
     }
 
     MapSize textSize = getEstimatedTextBoundary(caption, strokeWidth);
-    lineSegmentPath = lineSegmentPath.reducePathForText(textSize.width, repeatStart, repeatGap);
-    if (lineSegmentPath.segments.isEmpty) return;
+    List<LineSegmentPath> textPaths = lineSegmentPath.textPaths(textSize.width, repeatStart, repeatGap, repeat: repeat);
+    if (textPaths.isEmpty) return;
 
     PixelProjection projection = PixelProjection(zoomlevel);
-    for (var segment in lineSegmentPath.segments) {
-      // So text isn't upside down
-      bool doInvert = segment.end.x < segment.start.x;
-      Mappoint start;
-      double diff = (segment.length() - textSize.width) / 2;
-      if (doInvert) {
-        //start = segment.end.offset(-origin.x, -origin.y);
-        start = segment.pointAlongLineSegment(diff + textSize.width);
-      } else {
-        //start = segment.start.offset(-origin.x, -origin.y);
-        start = segment.pointAlongLineSegment(diff);
-      }
+    for (LineSegmentPath textPath in textPaths) {
+      // So text isn't upside down: letter from left to right
+      if (textPath.last.x < textPath.first.x) textPath = textPath.reversed();
+      Mappoint center = textPath.pointAt(textPath.length() / 2);
+      // The chord gives the collision box its orientation; the glyphs follow the curve.
+      double theta = LineSegment(textPath.first, textPath.last).getTheta();
 
       layerContainer.addClash(
         RenderInfoNode(
           NodeProperties(
-            PointOfInterest(wayProperties.layer, wayProperties.getTags(), LatLong(projection.pixelYToLatitude(start.y), projection.pixelXToLongitude(start.x))),
+            PointOfInterest(wayProperties.layer, wayProperties.getTags(), LatLong(projection.pixelYToLatitude(center.y), projection.pixelXToLongitude(center.x))),
             projection,
           ),
           this,
-          rotateRadians: segment.getTheta(),
+          rotateRadians: theta,
           caption: caption,
+          textPath: textPath,
         ),
       );
     }

@@ -8,7 +8,13 @@ class RenderInfoNode<T extends Renderinstruction> extends RenderInfo<T> {
   /// used for linesymbol and polyline_text
   final double rotateRadians;
 
-  RenderInfoNode(this.nodeProperties, T renderinstruction, {this.rotateRadians = 0, super.caption}) : super(renderinstruction);
+  /// polyline_text only: the stretch of the way (absolute pixels, oriented so
+  /// the text reads left to right) to letter the caption along. When set the
+  /// painter follows this curve instead of drawing one rotated string at the
+  /// node position.
+  final LineSegmentPath? textPath;
+
+  RenderInfoNode(this.nodeProperties, T renderinstruction, {this.rotateRadians = 0, super.caption, this.textPath}) : super(renderinstruction);
 
   @override
   void render(RenderContext renderContext) {

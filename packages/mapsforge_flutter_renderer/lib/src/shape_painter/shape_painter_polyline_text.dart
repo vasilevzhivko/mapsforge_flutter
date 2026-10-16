@@ -71,6 +71,12 @@ class ShapePainterPolylineText extends UiShapePainter<RenderinstructionPolylineT
     if (renderContext is! UiRenderContext) throw Exception("renderContext is not UiRenderContext ${renderContext.runtimeType}");
     if (renderInfo is! RenderInfoNode) throw Exception("renderInfo is not RenderInfoNode ${renderInfo.runtimeType}");
 
+    LineSegmentPath? textPath = renderInfo.textPath;
+    if (textPath != null && textPath.segments.isNotEmpty) {
+      _drawAlongPath(renderInfo.caption!, textPath, renderContext, 0);
+      return;
+    }
+
     MappointRelative relative = nodeProperties.getCoordinatesAbsolute().offset(renderContext.reference).offset(0, renderinstruction.dy);
     if (paintBack != null) {
       ParagraphEntry entry = ParagraphCacheMgr().getEntry(renderInfo.caption!, textPaint, paintBack!, renderinstruction.getMaxTextWidth());
@@ -94,27 +100,44 @@ class ShapePainterPolylineText extends UiShapePainter<RenderinstructionPolylineT
     }
 
     MapSize textSize = renderinstruction.getEstimatedTextBoundary(renderInfo.caption!, renderinstruction.strokeWidth);
-    lineSegmentPath = lineSegmentPath.reducePathForText(textSize.width, renderinstruction.repeatStart, renderinstruction.repeatGap);
-    if (lineSegmentPath.segments.isEmpty) return;
+    for (LineSegmentPath textPath in lineSegmentPath.textPaths(textSize.width, renderinstruction.repeatStart, renderinstruction.repeatGap, repeat: renderinstruction.repeat)) {
+      _drawAlongPath(renderInfo.caption!, textPath.last.x < textPath.first.x ? textPath.reversed() : textPath, renderContext, renderContext.rotationRadian);
+    }
+  }
 
-    for (var segment in lineSegmentPath.segments) {
-      // So text isn't upside down
-      bool doInvert = segment.end.x <= segment.start.x;
-      Mappoint start;
-      double diff = (segment.length() - textSize.width) / 2;
-      if (doInvert) {
-        start = segment.pointAlongLineSegment(diff + textSize.width);
-      } else {
-        start = segment.pointAlongLineSegment(diff);
-      }
+  /// Letters [text] along [path] (absolute pixels, already oriented left to
+  /// right), one glyph at a time, each rotated to the local direction of the
+  /// curve — the way mapsforge-java's drawTextOnPath renders street and river
+  /// names. The text is centred on the path and may overhang a short path
+  /// (see [LineSegmentPath.pointAt]). Halos are drawn first so they never
+  /// cover a neighbouring glyph's fill.
+  void _drawAlongPath(String text, LineSegmentPath path, UiRenderContext renderContext, double extraRotation) {
+    // Control and zero-width format characters (ZWSP, joiners, BOM, RTL marks)
+    // have no measurable width; a paragraph of one would fail layout.
+    final List<String> glyphs = text.runes.where((r) => r >= 32 && !(r >= 0x200B && r <= 0x200F) && r != 0xFEFF && r != 0x061C && !(r >= 0x202A && r <= 0x202E)).map((r) => String.fromCharCode(r)).toList();
+    if (glyphs.isEmpty) return;
+    final UiPaint? measurePaint = paintFront ?? paintBack;
+    if (measurePaint == null) return;
+    // A paragraph of only whitespace has no measurable line; give spaces a
+    // fixed advance and skip drawing them.
+    final double spaceWidth = renderinstruction.fontSize * 0.3;
+    final List<double> widths = [
+      for (String g in glyphs) g.trim().isEmpty ? spaceWidth : ParagraphCacheMgr().getEntry(g, textPaint, measurePaint, renderinstruction.getMaxTextWidth()).getWidth(),
+    ];
+    final double total = widths.fold(0, (a, b) => a + b);
+    final double startOffset = (path.length() - total) / 2;
 
-      if (paintBack != null) {
-        ParagraphEntry entry = ParagraphCacheMgr().getEntry(renderInfo.caption!, textPaint, paintBack!, renderinstruction.getMaxTextWidth());
-        renderContext.canvas.drawTextRotated(entry.paragraph, renderContext.rotationRadian + segment.getTheta(), start.offset(renderContext.reference));
-      }
-      if (paintFront != null) {
-        ParagraphEntry entry = ParagraphCacheMgr().getEntry(renderInfo.caption!, textPaint, paintFront!, renderinstruction.getMaxTextWidth());
-        renderContext.canvas.drawTextRotated(entry.paragraph, renderContext.rotationRadian + segment.getTheta(), start.offset(renderContext.reference));
+    for (UiPaint? paint in [paintBack, paintFront]) {
+      if (paint == null) continue;
+      double distance = startOffset;
+      for (int i = 0; i < glyphs.length; i++) {
+        double width = widths[i];
+        if (glyphs[i].trim().isNotEmpty) {
+          ParagraphEntry entry = ParagraphCacheMgr().getEntry(glyphs[i], textPaint, paint, renderinstruction.getMaxTextWidth());
+          double theta = path.directionAt(distance + width / 2);
+          renderContext.canvas.drawTextRotated(entry.paragraph, extraRotation + theta, path.pointAt(distance).offset(renderContext.reference));
+        }
+        distance += width;
       }
     }
   }
