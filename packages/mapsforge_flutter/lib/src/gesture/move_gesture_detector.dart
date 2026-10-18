@@ -80,7 +80,6 @@ class _MoveGestureDetectorState extends State<MoveGestureDetector> {
             mapModel: widget.mapModel,
             swipeAbsorption: widget.swipeAbsorption,
             startLocalFocalPoint: details.localFocalPoint,
-            startCenter: lastPosition.getCenter(),
           );
         }
       },
@@ -111,7 +110,6 @@ class _MoveEvent {
 
   final Offset startLocalFocalPoint;
 
-  final Mappoint startCenter;
 
   Timer? _startTimer;
 
@@ -131,7 +129,6 @@ class _MoveEvent {
     required this.mapModel,
     required this.swipeAbsorption,
     required this.startLocalFocalPoint,
-    required this.startCenter,
     int longPressDuration = 350,
   }) {
     _startTimer = Timer(Duration(milliseconds: longPressDuration), () {});
@@ -146,10 +143,20 @@ class _MoveEvent {
   }
 
   void update({required ScaleUpdateDetails details}) {
+    // Move INCREMENTALLY from the model's current position, by the finger's
+    // delta since the previous update. The old form kept the centre captured
+    // at finger-down in absolute map pixels and re-applied it on every update
+    // (setCenter(startCenter - totalDelta)). Absolute pixels only mean
+    // something at the zoom they were taken at: when anything else changed the
+    // position mid-drag (the app's "centre on my location" at z18 arriving
+    // while the user was still panning at z17), the next update pushed z17
+    // pixels into a z18 world — half the coordinates — which threw the map to
+    // the far north-west, i.e. onto the bounding-box corner / into the sea.
+    final Offset previous = _updateLocalFocalPoint ?? startLocalFocalPoint;
     _updateLocalFocalPoint = details.localFocalPoint;
-    // move map around
-    double diffX = (details.localFocalPoint.dx - startLocalFocalPoint.dx) * MapsforgeSettingsMgr().getDeviceScaleFactor();
-    double diffY = (details.localFocalPoint.dy - startLocalFocalPoint.dy) * MapsforgeSettingsMgr().getDeviceScaleFactor();
+    double diffX = (details.localFocalPoint.dx - previous.dx) * MapsforgeSettingsMgr().getDeviceScaleFactor();
+    double diffY = (details.localFocalPoint.dy - previous.dy) * MapsforgeSettingsMgr().getDeviceScaleFactor();
+    if (diffX == 0 && diffY == 0) return;
     if (mapModel.lastPosition?.rotation != 0) {
       double hyp = sqrt(diffX * diffX + diffY * diffY);
       double rad = atan2(diffY, diffX);
@@ -161,7 +168,7 @@ class _MoveEvent {
       _nextManualMoveEvent = DateTime.now().millisecondsSinceEpoch + 1000;
       mapModel.manualMove(Object());
     }
-    mapModel.setCenter(startCenter.x - diffX, startCenter.y - diffY);
+    mapModel.moveCenter(-diffX, -diffY);
   }
 
   bool end({required ScaleEndDetails details}) {
