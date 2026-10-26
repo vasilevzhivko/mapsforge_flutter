@@ -13,6 +13,16 @@ class CustomSourceSpec {
   final int zoomMin;
   final int zoomMax;
 
+  /// Deepest zoom the server actually has tiles for (XYZ only). Above it, up to
+  /// [zoomMax], the renderer fetches the ancestor tile at this zoom and scales
+  /// the matching quarter/sixteenth up ("overzoom"), like Leaflet's
+  /// maxNativeZoom. Null = no overzoom (every zoom is requested natively).
+  final int? nativeZoomMax;
+
+  /// Extra HTTP headers sent with every tile request (e.g. a per-install id a
+  /// provider asks for).
+  final Map<String, String>? headers;
+
   /// TMS Y-axis flip (XYZ only): false = XYZ/OSM (top-left origin).
   final bool flipY;
 
@@ -50,6 +60,8 @@ class CustomSourceSpec {
     required this.cacheKey,
     this.zoomMin = 0,
     this.zoomMax = 22,
+    this.nativeZoomMax,
+    this.headers,
     this.flipY = false,
     this.transparentOnMiss = false,
     this.layers,

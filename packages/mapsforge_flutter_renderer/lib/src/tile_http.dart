@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:dio/dio.dart';
@@ -24,15 +25,29 @@ final Dio tileDio = Dio(
 /// (overlay) or the "No data" placeholder (base). This keeps online-tile
 /// failures off the global-zone FATAL path (the app is offline-first and these
 /// requests routinely fail on airplane mode / throttling / server hiccups).
-Future<JobResult> fetchTileImage(Uri uri) async {
+Future<JobResult> fetchTileImage(Uri uri, {Map<String, String>? headers}) async {
   try {
-    final response = await tileDio.getUri(uri);
-    if (response.data == null) return JobResult.unsupported();
-    final codec = await ui.instantiateImageCodec(response.data);
+    final bytes = await fetchTileBytes(uri, headers: headers);
+    if (bytes == null) return JobResult.unsupported();
+    final codec = await ui.instantiateImageCodec(bytes);
     final frame = await codec.getNextFrame();
     return JobResult.normal(TilePicture.fromBitmap(frame.image));
   } catch (_) {
     return JobResult.unsupported();
+  }
+}
+
+/// Raw tile bytes for [uri], or null on any failure / non-2xx / empty body.
+/// Never throws.
+Future<Uint8List?> fetchTileBytes(Uri uri, {Map<String, String>? headers}) async {
+  try {
+    final response = await tileDio.getUri(uri, options: headers == null ? null : Options(headers: headers));
+    final data = response.data;
+    if (data == null) return null;
+    final bytes = data is Uint8List ? data : Uint8List.fromList(List<int>.from(data as List));
+    return bytes.isEmpty ? null : bytes;
+  } catch (_) {
+    return null;
   }
 }
 
